@@ -401,12 +401,69 @@
       padding: 40px;
       color: var(--text2);
     }
+    /* ── Login Screen ── */
+    .login-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+    }
+    .login-overlay.active { display: flex; }
+    .login-box {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+      width: 360px;
+      text-align: center;
+    }
+    .login-box .login-icon { font-size: 48px; margin-bottom: 12px; }
+    .login-box h2 { font-size: 20px; margin-bottom: 4px; }
+    .login-box p { font-size: 13px; color: var(--text2); margin-bottom: 24px; }
+    .login-box input[type="password"] {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 15px;
+      outline: none;
+      margin-bottom: 12px;
+    }
+    .login-box input[type="password"]:focus { border-color: var(--accent); }
+    .login-box .btn { width: 100%; justify-content: center; padding: 10px; font-size: 14px; }
+    .login-error {
+      color: var(--red);
+      font-size: 13px;
+      margin-top: 10px;
+      min-height: 18px;
+    }
+
   </style>
 </head>
 <body>
+  <!-- Login Overlay -->
+  <div class="login-overlay" id="loginOverlay">
+    <div class="login-box">
+      <div class="login-icon">🔐</div>
+      <h2>US Visa Scheduler</h2>
+      <p>Enter your dashboard password to continue</p>
+      <input type="password" id="loginPassword" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="btn btn-primary" onclick="doLogin()">Unlock Dashboard</button>
+      <div class="login-error" id="loginError"></div>
+    </div>
+  </div>
+
   <div class="header">
     <h1><span>🇺🇸</span> US Visa Scheduler Dashboard</h1>
-    <button class="btn btn-primary" onclick="showCreateModal()">+ New Job</button>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="btn btn-primary" onclick="showCreateModal()">+ New Job</button>
+      <button class="btn btn-ghost btn-sm" onclick="doLogout()" title="Logout">🔓 Logout</button>
+    </div>
   </div>
 
   <div class="container">
@@ -517,12 +574,73 @@
     let locationJobId = null;
 
     // ============================================================
+    // AUTH
+    // ============================================================
+    async function checkAuth() {
+      try {
+        const res = await fetch('/auth/check');
+        const data = await res.json();
+        if (!data.authenticated) {
+          showLogin();
+        } else {
+          loadJobs();
+        }
+      } catch (e) {
+        showLogin();
+      }
+    }
+
+    function showLogin() {
+      document.getElementById('loginOverlay').classList.add('active');
+      document.getElementById('loginPassword').focus();
+    }
+
+    function hideLogin() {
+      document.getElementById('loginOverlay').classList.remove('active');
+      document.getElementById('loginError').textContent = '';
+      document.getElementById('loginPassword').value = '';
+    }
+
+    async function doLogin() {
+      const password = document.getElementById('loginPassword').value;
+      const errEl = document.getElementById('loginError');
+      errEl.textContent = '';
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          hideLogin();
+          loadJobs();
+        } else {
+          errEl.textContent = data.error || 'Incorrect password';
+          document.getElementById('loginPassword').value = '';
+          document.getElementById('loginPassword').focus();
+        }
+      } catch (e) {
+        errEl.textContent = 'Connection error. Try again.';
+      }
+    }
+
+    async function doLogout() {
+      await fetch('/auth/logout', { method: 'POST' });
+      showLogin();
+    }
+
+    // ============================================================
     // API HELPERS
     // ============================================================
     async function api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
       if (body) opts.body = JSON.stringify(body);
       const resp = await fetch('/api' + path, opts);
+      if (resp.status === 401) {
+        showLogin();
+        throw new Error('Session expired. Please log in again.');
+      }
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Request failed');
       return data;
@@ -1081,11 +1199,16 @@
     // ============================================================
     // INIT
     // ============================================================
-    loadJobs();
+    checkAuth().then(() => {
+      // Only start polling if already authenticated (checkAuth calls loadJobs on success)
+    });
 
     // Auto-refresh job list every 5 seconds
     refreshInterval = setInterval(() => {
-      loadJobs();
+      // Only refresh if not on login screen
+      if (!document.getElementById('loginOverlay').classList.contains('active')) {
+        loadJobs();
+      }
     }, 5000);
 
     // Close modals with Escape

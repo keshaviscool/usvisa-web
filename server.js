@@ -19,6 +19,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const express = require('express');
+const session = require('express-session');
 const db = require('./database');
 const jobManager = require('./job-manager');
 const dropletManager = require('./droplet-manager');
@@ -26,9 +27,65 @@ const dropletManager = require('./droplet-manager');
 const app = express();
 const PORT = process.env.PORT || 3456;
 const CALLBACK_SECRET = process.env.CALLBACK_SECRET || 'changeme';
+const APP_PASSWORD = process.env.APP_PASSWORD || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'visa-scheduler-secret-' + Math.random().toString(36).slice(2);
+
+if (!APP_PASSWORD) {
+  console.warn('[Auth] WARNING: APP_PASSWORD is not set. The dashboard is unprotected!');
+}
+
+// ── Session middleware ──
+app.use(session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+  }
+}));
 
 // Middleware
 app.use(express.json());
+
+// ── Auth guard ──
+function requireAuth(req, res, next) {
+  if (!APP_PASSWORD) return next(); // no password set → open
+  if (req.session && req.session.authenticated) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  // For HTML pages, send the index (it will show the login screen)
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+}
+
+// Static assets (CSS, JS, images) served without auth
+app.use('/assets', express.static(path.join(__dirname, 'public', 'assets')));
+
+// ── Login / Logout routes ──
+app.post('/auth/login', (req, res) => {
+  const { password } = req.body;
+  if (!APP_PASSWORD || password === APP_PASSWORD) {
+    req.session.authenticated = true;
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ error: 'Invalid password' });
+});
+
+app.post('/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.json({ ok: true });
+  });
+});
+
+app.get('/auth/check', (req, res) => {
+  res.json({ authenticated: !APP_PASSWORD || !!(req.session && req.session.authenticated) });
+});
+
+// All routes below require auth
+app.use(requireAuth);
+
+// Serve public files (index.html etc.) behind auth
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================================
@@ -247,6 +304,8 @@ app.post('/api/callback/destroy', requireCallbackSecret, async (req, res) => {
 
 // ── SPA fallback ──
 app.get('*', (req, res) => {
+  // Callback routes should not fall through to SPA
+  if (req.path.startsWith('/api/callback/')) return res.status(404).end();
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
