@@ -48,14 +48,13 @@ app.use(session({
 // Middleware
 app.use(express.json());
 
-// ── Auth guard ──
+// ── Auth guard (page/HTML only — APIs are unguarded) ──
 function requireAuth(req, res, next) {
   if (!APP_PASSWORD) return next(); // no password set → open
   if (req.session && req.session.authenticated) return next();
-  // if (req.path.startsWith('/api/')) {
-  //   return res.status(401).json({ error: 'Unauthorized' });
-  // }
-  // For HTML pages, send the index (it will show the login screen)
+  // Block only the HTML page — API calls pass through freely
+  if (req.path.startsWith('/api/') || req.path.startsWith('/auth/')) return next();
+  // Unauthenticated browser request → serve index.html (shows login screen)
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 }
 
@@ -82,7 +81,7 @@ app.get('/auth/check', (req, res) => {
   res.json({ authenticated: !APP_PASSWORD || !!(req.session && req.session.authenticated) });
 });
 
-// All routes below require auth
+// Apply auth guard — only blocks the HTML page, APIs pass through
 app.use(requireAuth);
 
 // Serve public files (index.html etc.) behind auth

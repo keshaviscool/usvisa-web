@@ -730,10 +730,6 @@
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
       if (body) opts.body = JSON.stringify(body);
       const resp = await fetch('/api' + path, opts);
-      if (resp.status === 401) {
-        showLogin();
-        throw new Error('Session expired. Please log in again.');
-      }
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Request failed');
       return data;
