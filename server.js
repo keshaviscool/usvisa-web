@@ -52,9 +52,9 @@ app.use(express.json());
 function requireAuth(req, res, next) {
   if (!APP_PASSWORD) return next(); // no password set → open
   if (req.session && req.session.authenticated) return next();
-  if (req.path.startsWith('/api/')) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  // if (req.path.startsWith('/api/')) {
+  //   return res.status(401).json({ error: 'Unauthorized' });
+  // }
   // For HTML pages, send the index (it will show the login screen)
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 }
