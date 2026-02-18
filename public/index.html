@@ -401,6 +401,92 @@
       padding: 40px;
       color: var(--text2);
     }
+    /* ── Nav Tabs ── */
+    .nav-tabs {
+      display: flex;
+      gap: 4px;
+      background: var(--bg3);
+      border-radius: 8px;
+      padding: 4px;
+    }
+    .nav-tab {
+      padding: 7px 18px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      color: var(--text2);
+      border: none;
+      background: transparent;
+      transition: all 0.15s;
+    }
+    .nav-tab:hover { color: var(--text); }
+    .nav-tab.active { background: var(--bg2); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+
+    /* ── Droplets Table ── */
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .section-header h2 { font-size: 20px; }
+    .table-wrap { overflow-x: auto; }
+    table.droplet-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.droplet-table th {
+      text-align: left;
+      padding: 10px 14px;
+      color: var(--text2);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.droplet-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    table.droplet-table tr:last-child td { border-bottom: none; }
+    table.droplet-table tr:hover td { background: var(--bg3); }
+    .droplet-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .ds-active   { background: var(--green-bg); color: var(--green); }
+    .ds-new      { background: var(--yellow-bg); color: var(--yellow); }
+    .ds-off, .ds-archive { background: rgba(139,143,168,0.15); color: var(--text2); }
+    .ds-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+    }
+    .ds-active .ds-dot { background: var(--green); animation: pulse 2s infinite; }
+    .ds-new    .ds-dot { background: var(--yellow); }
+    .ds-off    .ds-dot { background: var(--text2); }
+    .linked-job {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .linked-job:hover { text-decoration: underline; }
+    .ip-mono {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      color: var(--text2);
+    }
+
     /* ── Login Screen ── */
     .login-overlay {
       display: none;
@@ -459,15 +545,22 @@
   </div>
 
   <div class="header">
-    <h1><span>🇺🇸</span> US Visa Scheduler Dashboard</h1>
+    <div style="display:flex;align-items:center;gap:20px">
+      <h1><span>🇺🇸</span> US Visa Scheduler</h1>
+      <nav class="nav-tabs">
+        <button class="nav-tab active" id="tabJobs" onclick="switchTab('jobs')">📋 Jobs</button>
+        <button class="nav-tab" id="tabDroplets" onclick="switchTab('droplets')">🖥 Droplets</button>
+      </nav>
+    </div>
     <div style="display:flex;gap:10px;align-items:center">
-      <button class="btn btn-primary" onclick="showCreateModal()">+ New Job</button>
+      <button class="btn btn-primary" id="btnNewJob" onclick="showCreateModal()">+ New Job</button>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()" title="Logout">🔓 Logout</button>
     </div>
   </div>
 
   <div class="container">
     <div id="app"></div>
+    <div id="dropletsPanel" style="display:none"></div>
   </div>
 
   <!-- Create / Edit Modal -->
@@ -1197,6 +1290,143 @@
     }
 
     // ============================================================
+    // TAB SWITCHING
+    // ============================================================
+    let activeTab = 'jobs';
+
+    function switchTab(tab) {
+      activeTab = tab;
+      document.getElementById('tabJobs').classList.toggle('active', tab === 'jobs');
+      document.getElementById('tabDroplets').classList.toggle('active', tab === 'droplets');
+      document.getElementById('app').style.display = tab === 'jobs' ? '' : 'none';
+      document.getElementById('dropletsPanel').style.display = tab === 'droplets' ? '' : 'none';
+      document.getElementById('btnNewJob').style.display = tab === 'jobs' ? '' : 'none';
+      if (tab === 'droplets') loadDroplets();
+    }
+
+    // ============================================================
+    // DROPLETS
+    // ============================================================
+    let dropletsRefreshInterval = null;
+
+    async function loadDroplets() {
+      const panel = document.getElementById('dropletsPanel');
+      panel.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Loading droplets...</div>';
+      try {
+        const data = await api('GET', '/droplets');
+        renderDroplets(data);
+      } catch (err) {
+        panel.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Error</h3><p>${esc(err.message)}</p></div>`;
+      }
+    }
+
+    function renderDroplets(data) {
+      const panel = document.getElementById('dropletsPanel');
+
+      if (!data.enabled) {
+        panel.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">☁️</div>
+            <h3>Droplet Mode Not Enabled</h3>
+            <p>Set <code style="background:var(--bg3);padding:2px 6px;border-radius:4px">DO_API_TOKEN</code> in your <code style="background:var(--bg3);padding:2px 6px;border-radius:4px">.env</code> to enable DigitalOcean droplet management.</p>
+          </div>`;
+        return;
+      }
+
+      const droplets = data.droplets || [];
+
+      let html = `
+        <div class="section-header">
+          <div>
+            <h2>Droplets</h2>
+            <div style="font-size:13px;color:var(--text2);margin-top:3px">${droplets.length} active droplet${droplets.length !== 1 ? 's' : ''} tagged <code style="background:var(--bg3);padding:1px 5px;border-radius:3px">visa-scheduler</code></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="loadDroplets()">🔄 Refresh</button>
+        </div>`;
+
+      if (droplets.length === 0) {
+        html += `
+          <div class="empty-state">
+            <div class="empty-state-icon">🖥</div>
+            <h3>No Droplets</h3>
+            <p>No DigitalOcean droplets are currently tagged <strong>visa-scheduler</strong>.</p>
+          </div>`;
+        panel.innerHTML = html;
+        return;
+      }
+
+      html += `
+        <div class="card">
+          <div class="table-wrap">
+            <table class="droplet-table">
+              <thead>
+                <tr>
+                  <th>Droplet</th>
+                  <th>Status</th>
+                  <th>IP Address</th>
+                  <th>Region / Size</th>
+                  <th>Linked Job</th>
+                  <th>Created</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>`;
+
+      for (const d of droplets) {
+        const statusCls = d.status === 'active' ? 'ds-active' : d.status === 'new' ? 'ds-new' : 'ds-off';
+        const createdAt = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
+        const linkedJobHtml = d.linkedJobId
+          ? `<span class="linked-job" onclick="goToJob('${esc(d.linkedJobId)}')" title="View job">
+               ${esc(d.linkedJobName || d.linkedJobId)}
+               <span style="font-size:10px;opacity:0.6">(${esc(d.linkedJobStatus || '')})</span>
+             </span>`
+          : `<span style="color:var(--text2);font-size:12px">— unlinked —</span>`;
+
+        html += `
+                <tr>
+                  <td>
+                    <div style="font-weight:600;font-size:13px">${esc(d.name)}</div>
+                    <div style="font-size:11px;color:var(--text2);margin-top:2px">ID: ${esc(String(d.id))}</div>
+                  </td>
+                  <td><span class="droplet-status ${statusCls}"><span class="ds-dot"></span>${esc(d.status)}</span></td>
+                  <td class="ip-mono">${d.ip ? esc(d.ip) : '—'}</td>
+                  <td style="font-size:12px;color:var(--text2)">${esc(d.region || '—')} / ${esc(d.size || '—')}</td>
+                  <td>${linkedJobHtml}</td>
+                  <td style="font-size:12px;color:var(--text2)">${esc(createdAt)}</td>
+                  <td>
+                    <button class="btn btn-danger btn-sm" onclick="destroyDroplet(${d.id}, '${esc(d.name)}')">🗑 Destroy</button>
+                  </td>
+                </tr>`;
+      }
+
+      html += `
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+
+      panel.innerHTML = html;
+    }
+
+    async function destroyDroplet(doId, name) {
+      if (!confirm(`Destroy droplet "${name}" (#${doId})?\n\nThis is irreversible and will immediately terminate the running agent.`)) return;
+      try {
+        await api('DELETE', '/droplets/' + doId);
+        toast('Droplet #' + doId + ' destroyed.', 'success');
+        loadDroplets();
+        // Also refresh jobs in case a linked job's status changed
+        loadJobs();
+      } catch (err) {
+        toast('Failed to destroy: ' + err.message, 'error');
+      }
+    }
+
+    function goToJob(id) {
+      switchTab('jobs');
+      viewJob(id);
+    }
+
+    // ============================================================
     // INIT
     // ============================================================
     checkAuth().then(() => {
@@ -1207,7 +1437,8 @@
     refreshInterval = setInterval(() => {
       // Only refresh if not on login screen
       if (!document.getElementById('loginOverlay').classList.contains('active')) {
-        loadJobs();
+        if (activeTab === 'jobs') loadJobs();
+        else if (activeTab === 'droplets') loadDroplets();
       }
     }, 5000);
 

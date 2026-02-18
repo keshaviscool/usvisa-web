@@ -244,6 +244,72 @@ app.get('/api/droplet-mode', (req, res) => {
   res.json({ enabled: dropletManager.isEnabled() });
 });
 
+// ── List all DO droplets tagged visa-scheduler ──
+app.get('/api/droplets', async (req, res) => {
+  if (!dropletManager.isEnabled()) {
+    return res.json({ droplets: [], enabled: false });
+  }
+  try {
+    const doDroplets = await dropletManager.listJobDroplets();
+    // Cross-reference with our job DB so we can show the linked job name
+    const allJobs = jobManager.getAllJobs();
+    const jobByDropletId = {};
+    for (const j of allJobs) {
+      if (j.dropletId) jobByDropletId[String(j.dropletId)] = j;
+    }
+
+    const droplets = doDroplets.map(d => {
+      const ipv4 = (d.networks && d.networks.v4 || []).find(n => n.type === 'public');
+      const linkedJob = jobByDropletId[String(d.id)];
+      return {
+        id: d.id,
+        name: d.name,
+        status: d.status,
+        ip: ipv4 ? ipv4.ip_address : null,
+        region: d.region ? d.region.slug : null,
+        size: d.size_slug,
+        createdAt: d.created_at,
+        tags: d.tags || [],
+        linkedJobId: linkedJob ? linkedJob.id : null,
+        linkedJobName: linkedJob ? linkedJob.name : null,
+        linkedJobStatus: linkedJob ? linkedJob.status : null
+      };
+    });
+    res.json({ droplets, enabled: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Destroy a specific DO droplet by its DO ID ──
+app.delete('/api/droplets/:dropletId', async (req, res) => {
+  if (!dropletManager.isEnabled()) {
+    return res.status(400).json({ error: 'Droplet mode not enabled' });
+  }
+  try {
+    const doId = req.params.dropletId;
+    await dropletManager.destroyDroplet(doId);
+
+    // If this droplet was linked to a job, clean up the DB reference
+    const allJobs = jobManager.getAllJobs();
+    const linked = allJobs.find(j => String(j.dropletId) === String(doId));
+    if (linked) {
+      const db = require('./database');
+      db.updateJob(linked.id, {
+        dropletId: null,
+        dropletIp: null,
+        dropletStatus: 'destroyed',
+        status: linked.status === 'booked' ? 'booked' : 'stopped'
+      });
+      db.addLog(linked.id, 'warn', 'Droplet #' + doId + ' manually destroyed from dashboard.');
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================
 // CALLBACK ROUTES - Called by droplet agents
 // ============================================================
