@@ -1,9 +1,11 @@
 // ============================================================
 // JOB MANAGER - Manages all scheduler instances
+// Supports local mode (default) and droplet mode (DO_API_TOKEN set)
 // ============================================================
 
 const db = require('./database');
 const { SchedulerInstance, loadModules } = require('./scheduler-engine');
+const dropletManager = require('./droplet-manager');
 
 class JobManager {
   constructor() {
@@ -15,10 +17,10 @@ class JobManager {
   async init() {
     await loadModules();
 
-    // Any jobs that were 'running' when server died → mark as 'stopped'
+    // Any jobs that were 'running' or 'provisioning' when server died → mark as 'stopped'
     const allJobs = db.getAllJobs();
     for (const job of allJobs) {
-      if (job.status === 'running') {
+      if (job.status === 'running' || job.status === 'provisioning') {
         db.updateJob(job.id, { status: 'stopped' });
       }
     }
@@ -79,6 +81,9 @@ class JobManager {
     if (existing && existing.running) {
       throw new Error('Job is already running.');
     }
+    if (job.dropletId && (job.status === 'running' || job.status === 'provisioning')) {
+      throw new Error('Job already has an active droplet.');
+    }
 
     // Validate required fields
     if (!job.email || !job.password || !job.scheduleId) {
@@ -88,11 +93,20 @@ class JobManager {
       throw new Error('No facility IDs configured. Fetch locations first and select facilities.');
     }
 
-    // Create and start instance
+    // ── DROPLET MODE ──
+    if (dropletManager.isEnabled()) {
+      return this._startDropletJob(id, job);
+    }
+
+    // ── LOCAL MODE ──
+    return this._startLocalJob(id, job);
+  }
+
+  // ── Start job locally (original behaviour) ──
+  async _startLocalJob(id, job) {
     const instance = new SchedulerInstance(id);
     this.instances.set(id, instance);
 
-    // Start in background (don't await the full loop)
     instance.start().catch(err => {
       console.error('[JobManager] Job ' + id + ' crashed:', err.message);
       db.updateJob(id, { status: 'error', lastError: err.message });
@@ -101,8 +115,60 @@ class JobManager {
     return this.getJob(id);
   }
 
+  // ── Start job on a new DigitalOcean droplet ──
+  async _startDropletJob(id, job) {
+    console.log('[JobManager] Droplet mode: spawning droplet for job ' + id);
+    db.updateJob(id, { status: 'provisioning', dropletId: null, dropletIp: null, dropletStatus: 'creating' });
+
+    const jobConfig = {
+      email: job.email,
+      password: job.password,
+      scheduleId: job.scheduleId,
+      country: job.country,
+      facilityIds: job.facilityIds,
+      startDate: job.startDate,
+      endDate: job.endDate,
+      checkIntervalSeconds: job.checkIntervalSeconds,
+      autoBook: job.autoBook,
+      maxReloginAttempts: job.maxReloginAttempts,
+      requestTimeoutMs: job.requestTimeoutMs,
+      maxRetries: job.maxRetries
+    };
+
+    // Spawn droplet in background - don't block HTTP response
+    this._provisionDroplet(id, jobConfig).catch(err => {
+      console.error('[JobManager] Droplet provisioning failed for job ' + id + ':', err.message);
+      db.updateJob(id, { status: 'error', lastError: 'Droplet provisioning failed: ' + err.message, dropletStatus: 'failed' });
+      db.addLog(id, 'error', 'Droplet provisioning failed: ' + err.message);
+    });
+
+    return this.getJob(id);
+  }
+
+  async _provisionDroplet(id, jobConfig) {
+    // 1. Create droplet
+    const droplet = await dropletManager.createDroplet(id, jobConfig);
+    db.updateJob(id, { dropletId: String(droplet.id), dropletStatus: 'booting' });
+    db.addLog(id, 'info', 'Droplet #' + droplet.id + ' created. Waiting for it to boot...');
+
+    // 2. Wait until active
+    const { ip } = await dropletManager.waitForActive(droplet.id);
+    db.updateJob(id, { dropletIp: ip, dropletStatus: 'active', status: 'running' });
+    db.addLog(id, 'success', 'Droplet active at ' + ip + '. Agent starting...');
+  }
+
   // ── Stop a job ──
   async stopJob(id) {
+    // ── Droplet mode: destroy the droplet ──
+    if (dropletManager.isEnabled()) {
+      const job = db.getJob(id);
+      if (job && job.dropletId) {
+        await this.destroyJobDroplet(id);
+        return this.getJob(id);
+      }
+    }
+
+    // ── Local mode ──
     const instance = this.instances.get(id);
     if (instance && instance.running) {
       await instance.stop();
@@ -112,6 +178,22 @@ class JobManager {
       db.updateJob(id, { status: 'stopped' });
     }
     return this.getJob(id);
+  }
+
+  // ── Destroy the droplet for a job and clean up ──
+  async destroyJobDroplet(id) {
+    const job = db.getJob(id);
+    if (!job || !job.dropletId) return;
+
+    console.log('[JobManager] Destroying droplet ' + job.dropletId + ' for job ' + id);
+    await dropletManager.destroyDroplet(job.dropletId);
+    db.updateJob(id, {
+      status: job.status === 'booked' ? 'booked' : 'stopped',
+      dropletId: null,
+      dropletIp: null,
+      dropletStatus: 'destroyed'
+    });
+    db.addLog(id, 'info', 'Droplet destroyed.');
   }
 
   // ── Fetch locations for a job (login + scrape, return locations) ──
@@ -187,6 +269,7 @@ class JobManager {
 
   // ── Enrich DB job with live instance status ──
   _enrichWithLiveStatus(job) {
+    // Local instance live stats
     const instance = this.instances.get(job.id);
     if (instance && instance.running) {
       const status = instance.getStatus();

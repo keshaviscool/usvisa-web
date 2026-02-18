@@ -2,13 +2,30 @@
 // EXPRESS SERVER - REST API + Static frontend
 // ============================================================
 
-const express = require('express');
+// Load .env if present
+const fs = require('fs');
 const path = require('path');
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  fs.readFileSync(envPath, 'utf8').split('\n').forEach(line => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) return;
+    const k = trimmed.slice(0, idx).trim();
+    const v = trimmed.slice(idx + 1).trim();
+    if (k && !process.env[k]) process.env[k] = v;
+  });
+}
+
+const express = require('express');
 const db = require('./database');
 const jobManager = require('./job-manager');
+const dropletManager = require('./droplet-manager');
 
 const app = express();
 const PORT = process.env.PORT || 3456;
+const CALLBACK_SECRET = process.env.CALLBACK_SECRET || 'changeme';
 
 // Middleware
 app.use(express.json());
@@ -162,6 +179,69 @@ app.post('/api/jobs/:id/reset', (req, res) => {
     res.json({ ...job, password: '••••••••' });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Droplet mode status ──
+app.get('/api/droplet-mode', (req, res) => {
+  res.json({ enabled: dropletManager.isEnabled() });
+});
+
+// ============================================================
+// CALLBACK ROUTES - Called by droplet agents
+// ============================================================
+
+function requireCallbackSecret(req, res, next) {
+  const secret = req.headers['x-callback-secret'];
+  if (secret !== CALLBACK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+// ── Droplet log callback ──
+app.post('/api/callback/log', requireCallbackSecret, (req, res) => {
+  const { jobId, level, message } = req.body;
+  if (!jobId || !level || !message) return res.status(400).json({ error: 'Missing fields' });
+  try {
+    db.addLog(jobId, level, '[droplet] ' + message);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Droplet status callback ──
+app.post('/api/callback/status', requireCallbackSecret, (req, res) => {
+  const { jobId, status, ...rest } = req.body;
+  if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
+  try {
+    const update = {};
+    const allowed = [
+      'status', 'lastError', 'totalChecks', 'successfulChecks', 'failedChecks',
+      'consecutiveFailures', 'reloginCount', 'lastCheckAt', 'startedAt',
+      'bookedDate', 'bookedTime', 'bookedFacility', 'bookedAt'
+    ];
+    if (status) update.status = status;
+    for (const key of allowed) {
+      if (rest[key] !== undefined) update[key] = rest[key];
+    }
+    if (Object.keys(update).length) db.updateJob(jobId, update);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Droplet destroy callback (agent signals it's done) ──
+app.post('/api/callback/destroy', requireCallbackSecret, async (req, res) => {
+  const { jobId } = req.body;
+  if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
+  res.json({ ok: true }); // respond immediately, destroy in background
+  try {
+    await jobManager.destroyJobDroplet(jobId);
+  } catch (err) {
+    console.error('[Server] Failed to destroy droplet for job ' + jobId + ':', err.message);
   }
 });
 

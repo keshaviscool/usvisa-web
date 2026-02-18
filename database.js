@@ -49,6 +49,9 @@ function initDatabase() {
       last_error TEXT,
       last_check_at TEXT,
       started_at TEXT,
+      droplet_id TEXT,
+      droplet_ip TEXT,
+      droplet_status TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -75,6 +78,12 @@ function initDatabase() {
       FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
     );
   `);
+
+  // Migrate existing DBs: add droplet columns if missing
+  const cols = db.prepare("PRAGMA table_info(jobs)").all().map(c => c.name);
+  if (!cols.includes('droplet_id'))     db.exec("ALTER TABLE jobs ADD COLUMN droplet_id TEXT");
+  if (!cols.includes('droplet_ip'))     db.exec("ALTER TABLE jobs ADD COLUMN droplet_ip TEXT");
+  if (!cols.includes('droplet_status')) db.exec("ALTER TABLE jobs ADD COLUMN droplet_status TEXT");
 
   return db;
 }
@@ -139,7 +148,8 @@ function updateJob(id, data) {
     totalChecks: 'total_checks', successfulChecks: 'successful_checks',
     failedChecks: 'failed_checks', consecutiveFailures: 'consecutive_failures',
     reloginCount: 'relogin_count', lastError: 'last_error',
-    lastCheckAt: 'last_check_at', startedAt: 'started_at'
+    lastCheckAt: 'last_check_at', startedAt: 'started_at',
+    dropletId: 'droplet_id', dropletIp: 'droplet_ip', dropletStatus: 'droplet_status'
   };
 
   for (const [key, col] of Object.entries(allowedFields)) {
@@ -194,6 +204,9 @@ function formatJob(row) {
     lastError: row.last_error,
     lastCheckAt: row.last_check_at,
     startedAt: row.started_at,
+    dropletId: row.droplet_id,
+    dropletIp: row.droplet_ip,
+    dropletStatus: row.droplet_status,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
