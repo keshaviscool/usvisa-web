@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>US Visa Scheduler Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --bg2: #161821;
+      --bg3: #1e2030;
+      --border: #2a2d3e;
+      --text: #e2e4f0;
+      --text2: #8b8fa8;
+      --accent: #6c7ee1;
+      --accent2: #4c5dd4;
+      --green: #4ade80;
+      --green-bg: rgba(74,222,128,0.1);
+      --red: #f87171;
+      --red-bg: rgba(248,113,113,0.1);
+      --yellow: #facc15;
+      --yellow-bg: rgba(250,204,21,0.1);
+      --blue: #60a5fa;
+      --blue-bg: rgba(96,165,250,0.1);
+      --radius: 10px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+
+    /* ── Header ── */
+    .header {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; }
+    .header h1 span { font-size: 22px; margin-right: 8px; }
+
+    /* ── Layout ── */
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-success { background: var(--green); color: #000; }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-warning { background: var(--yellow); color: #000; }
+    .btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+    .btn-ghost:hover { border-color: var(--text); color: var(--text); }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-header h2 { font-size: 14px; font-weight: 600; }
+    .card-body { padding: 18px; }
+
+    /* ── Job List ── */
+    .jobs-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .jobs-header h2 { font-size: 20px; }
+    .job-grid { display: grid; gap: 16px; }
+    .job-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .job-card:hover { border-color: var(--accent); }
+    .job-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .job-name { font-size: 16px; font-weight: 600; }
+    .job-email { font-size: 13px; color: var(--text2); margin-top: 2px; }
+
+    /* ── Status badges ── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .badge-running { background: var(--green-bg); color: var(--green); }
+    .badge-stopped { background: rgba(139,143,168,0.15); color: var(--text2); }
+    .badge-booked { background: var(--blue-bg); color: var(--blue); }
+    .badge-error { background: var(--red-bg); color: var(--red); }
+    .badge-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      display: inline-block;
+    }
+    .badge-running .badge-dot { background: var(--green); animation: pulse 2s infinite; }
+    .badge-stopped .badge-dot { background: var(--text2); }
+    .badge-booked .badge-dot { background: var(--blue); }
+    .badge-error .badge-dot { background: var(--red); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .job-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .job-stat {
+      background: var(--bg3);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .job-stat-label { color: var(--text2); margin-bottom: 2px; }
+    .job-stat-value { font-weight: 600; font-size: 14px; }
+    .job-stat-value.green { color: var(--green); }
+    .job-stat-value.red { color: var(--red); }
+    .job-stat-value.blue { color: var(--blue); }
+
+    .job-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    /* ── Forms ── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 550px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-header h2 { font-size: 16px; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text2);
+      font-size: 20px;
+      cursor: pointer;
+    }
+    .modal-body { padding: 20px; }
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .form-group { margin-bottom: 14px; }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text2);
+      margin-bottom: 5px;
+    }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    .form-group input:focus, .form-group select:focus {
+      border-color: var(--accent);
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    /* ── Log viewer ── */
+    .log-viewer {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      max-height: 500px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .log-line { white-space: pre-wrap; word-break: break-all; }
+    .log-ts { color: var(--text2); }
+    .log-info { color: var(--blue); }
+    .log-success { color: var(--green); }
+    .log-warn { color: var(--yellow); }
+    .log-error { color: var(--red); }
+    .log-debug { color: var(--text2); }
+
+    .log-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .log-controls label {
+      font-size: 12px;
+      color: var(--text2);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .log-controls input[type="checkbox"] { accent-color: var(--accent); }
+
+    /* ── Booking banner ── */
+    .booking-banner {
+      background: var(--blue-bg);
+      border: 1px solid rgba(96,165,250,0.3);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .booking-banner-icon { font-size: 32px; }
+    .booking-banner h3 { font-size: 15px; color: var(--blue); }
+    .booking-banner p { font-size: 13px; color: var(--text2); margin-top: 2px; }
+
+    /* ── Facility chips ── */
+    .facility-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .facility-chip {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .facility-chip .remove {
+      cursor: pointer;
+      color: var(--red);
+      font-weight: bold;
+    }
+
+    /* ── Location picker ── */
+    .location-list { max-height: 300px; overflow-y: auto; }
+    .location-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .location-item:hover { background: var(--bg3); }
+    .location-item input { accent-color: var(--accent); }
+
+    /* ── Empty state ── */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text2);
+    }
+    .empty-state-icon { font-size: 48px; margin-bottom: 16px; }
+    .empty-state h3 { font-size: 18px; margin-bottom: 8px; color: var(--text); }
+
+    /* ── Toast ── */
+    .toast-container {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 200;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      padding: 12px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      animation: slideIn 0.3s;
+      max-width: 400px;
+    }
+    .toast-success { background: var(--green-bg); color: var(--green); border: 1px solid rgba(74,222,128,0.3); }
+    .toast-error { background: var(--red-bg); color: var(--red); border: 1px solid rgba(248,113,113,0.3); }
+    .toast-info { background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(96,165,250,0.3); }
+
+    @keyframes slideIn {
+      from { transform: translateX(100px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* ── Detail View ── */
+    .detail-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text2);
+      font-size: 13px;
+      margin-bottom: 16px;
+      cursor: pointer;
+    }
+    .detail-back:hover { color: var(--text); }
+    .detail-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }
+    .detail-sections { display: grid; gap: 16px; }
+
+    /* ── Loader ── */
+    .spinner {
+      display: inline-block;
+      width: 16px; height: 16px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-overlay {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 40px;
+      color: var(--text2);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1><span>🇺🇸</span> US Visa Scheduler Dashboard</h1>
+    <button class="btn btn-primary" onclick="showCreateModal()">+ New Job</button>
+  </div>
+
+  <div class="container">
+    <div id="app"></div>
+  </div>
+
+  <!-- Create / Edit Modal -->
+  <div class="modal-overlay" id="jobModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="modalTitle">Create New Job</h2>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editJobId">
+        <div class="form-group">
+          <label>Job Name</label>
+          <input type="text" id="fName" placeholder="e.g. John's Visa">
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="fEmail" placeholder="your-email@example.com">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="fPassword" placeholder="Account password">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Schedule ID</label>
+            <input type="text" id="fScheduleId" placeholder="e.g. 72495129">
+          </div>
+          <div class="form-group">
+            <label>Country</label>
+            <select id="fCountry">
+              <option value="en-ca">Canada (en-ca)</option>
+              <option value="en-us">USA (en-us)</option>
+              <option value="en-gb">UK (en-gb)</option>
+              <option value="en-in">India (en-in)</option>
+              <option value="en-mx">Mexico (en-mx)</option>
+              <option value="en-co">Colombia (en-co)</option>
+              <option value="en-br">Brazil (en-br)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Start Date</label>
+            <input type="date" id="fStartDate">
+          </div>
+          <div class="form-group">
+            <label>End Date</label>
+            <input type="date" id="fEndDate">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Check Interval (seconds)</label>
+            <input type="number" id="fInterval" value="30" min="5">
+          </div>
+          <div class="form-group">
+            <label>Auto Book</label>
+            <select id="fAutoBook">
+              <option value="true">Yes - Auto book when found</option>
+              <option value="false">No - Just notify</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveJob()">Save Job</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Location Picker Modal -->
+  <div class="modal-overlay" id="locationModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Select Locations</h2>
+        <button class="modal-close" onclick="closeLocationModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="locationContent">
+          <div class="loading-overlay"><div class="spinner"></div> Logging in & fetching locations...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeLocationModal()">Cancel</button>
+        <button class="btn btn-primary" id="saveLocationsBtn" onclick="saveLocations()" disabled>Save Selected</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toasts"></div>
+
+  <script>
+    // ============================================================
+    // STATE
+    // ============================================================
+    let currentView = 'list'; // 'list' | 'detail'
+    let currentJobId = null;
+    let jobs = [];
+    let refreshInterval = null;
+    let logRefreshInterval = null;
+    let fetchedLocations = [];
+    let locationJobId = null;
+
+    // ============================================================
+    // API HELPERS
+    // ============================================================
+    async function api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const resp = await fetch('/api' + path, opts);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+
+    // ============================================================
+    // TOAST
+    // ============================================================
+    function toast(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = 'toast toast-' + type;
+      el.textContent = msg;
+      document.getElementById('toasts').appendChild(el);
+      setTimeout(() => el.remove(), 4000);
+    }
+
+    // ============================================================
+    // RENDER
+    // ============================================================
+    function render() {
+      if (currentView === 'list') renderJobList();
+      else renderJobDetail();
+    }
+
+    function renderJobList() {
+      const app = document.getElementById('app');
+      if (jobs.length === 0) {
+        app.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">📋</div>
+            <h3>No Jobs Yet</h3>
+            <p>Create your first scheduler job to get started.</p>
+            <br>
+            <button class="btn btn-primary" onclick="showCreateModal()">+ Create Job</button>
+          </div>`;
+        return;
+      }
+
+      let html = '<div class="job-grid">';
+      for (const job of jobs) {
+        const badge = statusBadge(job.status);
+        const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+        const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+
+        html += `
+          <div class="job-card" onclick="viewJob('${job.id}')">
+            <div class="job-card-top">
+              <div>
+                <div class="job-name">${esc(job.name)}</div>
+                <div class="job-email">${esc(job.email)} · Schedule ${esc(job.scheduleId)}</div>
+              </div>
+              ${badge}
+            </div>`;
+
+        if (job.status === 'booked' && job.bookedDate) {
+          html += `
+            <div class="booking-banner">
+              <div class="booking-banner-icon">🎉</div>
+              <div>
+                <h3>Booked: ${esc(job.bookedDate)} at ${esc(job.bookedTime || '—')}</h3>
+                <p>${esc(job.bookedFacility || '')}</p>
+              </div>
+            </div>`;
+        }
+
+        html += `
+            <div class="job-stats">
+              <div class="job-stat">
+                <div class="job-stat-label">Date Range</div>
+                <div class="job-stat-value">${esc(job.startDate)} → ${esc(job.endDate)}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Checks</div>
+                <div class="job-stat-value">${job.successfulChecks}/${job.totalChecks} <span style="color:var(--text2);font-weight:400">(${rate}%)</span></div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Uptime</div>
+                <div class="job-stat-value">${uptime}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Locations</div>
+                <div class="job-stat-value">${(job.facilityIds || []).length} selected</div>
+              </div>
+            </div>
+          </div>`;
+      }
+      html += '</div>';
+      app.innerHTML = html;
+    }
+
+    function renderJobDetail() {
+      const job = jobs.find(j => j.id === currentJobId);
+      if (!job) { currentView = 'list'; render(); return; }
+
+      const badge = statusBadge(job.status);
+      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+      const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+
+      let html = `
+        <div class="detail-back" onclick="backToList()">← Back to Jobs</div>
+        <div class="detail-header">
+          <div>
+            <h2 style="font-size:22px;margin-bottom:4px">${esc(job.name)}</h2>
+            <div style="font-size:13px;color:var(--text2)">${esc(job.email)} · Schedule ${esc(job.scheduleId)} · ${esc(job.country)}</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            ${badge}
+          </div>
+        </div>`;
+
+      if (job.status === 'booked' && job.bookedDate) {
+        html += `
+          <div class="booking-banner">
+            <div class="booking-banner-icon">🎉</div>
+            <div>
+              <h3>Appointment Booked!</h3>
+              <p>Date: ${esc(job.bookedDate)} · Time: ${esc(job.bookedTime || '—')} · ${esc(job.bookedFacility || '')}</p>
+              <p style="margin-top:4px;font-size:12px">Booked at: ${job.bookedAt || '—'}</p>
+            </div>
+          </div>`;
+      }
+
+      html += `<div class="detail-sections">`;
+
+      // ── Controls ──
+      html += `
+        <div class="card">
+          <div class="card-header"><h2>Controls</h2></div>
+          <div class="card-body">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              ${job.status === 'running'
+                ? `<button class="btn btn-danger" onclick="stopJob('${job.id}')">⏹ Stop</button>`
+                : `<button class="btn btn-success" onclick="startJob('${job.id}')" ${(job.facilityIds || []).length === 0 ? 'disabled title="Select locations first"' : ''}>▶ Start</button>`
+              }
+              <button class="btn btn-ghost" onclick="showEditModal('${job.id}')">✏️ Edit</button>
+              <button class="btn btn-ghost" onclick="openLocationPicker('${job.id}')">📍 Locations</button>
+              ${job.status === 'booked' ? `<button class="btn btn-warning btn-sm" onclick="resetJob('${job.id}')">🔄 Reset Booking</button>` : ''}
+              <button class="btn btn-danger btn-sm" onclick="deleteJob('${job.id}')" style="margin-left:auto">🗑 Delete</button>
+            </div>
+          </div>
+        </div>`;
+
+      // ── Stats ──
+      html += `
+        <div class="card">
+          <div class="card-header"><h2>Stats</h2></div>
+          <div class="card-body">
+            <div class="job-stats">
+              <div class="job-stat">
+                <div class="job-stat-label">Total Checks</div>
+                <div class="job-stat-value">${job.totalChecks}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Successful</div>
+                <div class="job-stat-value green">${job.successfulChecks}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Failed</div>
+                <div class="job-stat-value red">${job.failedChecks}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Success Rate</div>
+                <div class="job-stat-value">${rate}%</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Consecutive Fails</div>
+                <div class="job-stat-value ${job.consecutiveFailures > 3 ? 'red' : ''}">${job.consecutiveFailures}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Re-logins</div>
+                <div class="job-stat-value">${job.reloginCount}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Uptime</div>
+                <div class="job-stat-value">${uptime}</div>
+              </div>
+              <div class="job-stat">
+                <div class="job-stat-label">Last Check</div>
+                <div class="job-stat-value" style="font-size:11px">${job.lastCheckAt ? new Date(job.lastCheckAt).toLocaleTimeString() : '—'}</div>
+              </div>
+            </div>
+            ${job.lastError ? `<div style="margin-top:12px;padding:8px 12px;background:var(--red-bg);border-radius:6px;font-size:12px;color:var(--red)">Last error: ${esc(job.lastError)}</div>` : ''}
+          </div>
+        </div>`;
+
+      // ── Config ──
+      html += `
+        <div class="card">
+          <div class="card-header"><h2>Configuration</h2></div>
+          <div class="card-body">
+            <div class="job-stats">
+              <div class="job-stat"><div class="job-stat-label">Date Range</div><div class="job-stat-value">${esc(job.startDate)} → ${esc(job.endDate)}</div></div>
+              <div class="job-stat"><div class="job-stat-label">Interval</div><div class="job-stat-value">${job.checkIntervalSeconds}s</div></div>
+              <div class="job-stat"><div class="job-stat-label">Auto Book</div><div class="job-stat-value">${job.autoBook ? '✅ Yes' : '❌ No'}</div></div>
+              <div class="job-stat"><div class="job-stat-label">Country</div><div class="job-stat-value">${esc(job.country)}</div></div>
+            </div>
+            <div style="margin-top:12px">
+              <div style="font-size:13px;color:var(--text2);margin-bottom:6px">Selected Locations (${(job.facilityIds||[]).length}):</div>
+              <div class="facility-chips" id="facilityChips">
+                ${(job.facilityIds || []).length === 0
+                  ? '<span style="color:var(--text2);font-size:12px">No locations selected. Click "📍 Locations" to fetch and select.</span>'
+                  : (job.facilityIds || []).map(id => `<span class="facility-chip">${esc(id)}</span>`).join('')
+                }
+              </div>
+            </div>
+          </div>
+        </div>`;
+
+      // ── Logs ──
+      html += `
+        <div class="card">
+          <div class="card-header">
+            <h2>Logs</h2>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="refreshLogs()">🔄 Refresh</button>
+              <button class="btn btn-ghost btn-sm" onclick="clearJobLogs('${job.id}')">🗑 Clear</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="log-controls">
+              <label><input type="checkbox" id="logAutoScroll" checked> Auto-scroll</label>
+              <label><input type="checkbox" id="logShowDebug"> Show debug</label>
+              <label><input type="checkbox" id="logAutoRefresh" ${job.status === 'running' ? 'checked' : ''}  onchange="toggleLogAutoRefresh(this.checked)"> Auto-refresh</label>
+            </div>
+            <div class="log-viewer" id="logViewer">
+              <div class="loading-overlay"><div class="spinner"></div> Loading logs...</div>
+            </div>
+          </div>
+        </div>`;
+
+      html += `</div>`;
+      document.getElementById('app').innerHTML = html;
+
+      // Load logs
+      loadLogs();
+      if (job.status === 'running') {
+        toggleLogAutoRefresh(true);
+      }
+
+      // Load location names for facility chips
+      loadFacilityNames(job);
+    }
+
+    // ============================================================
+    // DATA LOADING
+    // ============================================================
+    async function loadJobs() {
+      try {
+        jobs = await api('GET', '/jobs');
+        render();
+      } catch (err) {
+        toast('Failed to load jobs: ' + err.message, 'error');
+      }
+    }
+
+    async function loadLogs() {
+      if (!currentJobId) return;
+      try {
+        const showDebug = document.getElementById('logShowDebug')?.checked;
+        const data = await api('GET', '/jobs/' + currentJobId + '/logs?limit=300' + (showDebug ? '' : ''));
+        const viewer = document.getElementById('logViewer');
+        if (!viewer) return;
+
+        let logs = data.logs || [];
+        if (!showDebug) logs = logs.filter(l => l.level !== 'debug');
+
+        if (logs.length === 0) {
+          viewer.innerHTML = '<div style="color:var(--text2);padding:20px;text-align:center">No logs yet</div>';
+          return;
+        }
+
+        viewer.innerHTML = logs.map(l => {
+          const ts = new Date(l.created_at).toLocaleTimeString();
+          return `<div class="log-line"><span class="log-ts">[${ts}]</span> <span class="log-${l.level}">${esc(l.message)}</span></div>`;
+        }).join('');
+
+        if (document.getElementById('logAutoScroll')?.checked) {
+          viewer.scrollTop = viewer.scrollHeight;
+        }
+      } catch (err) { /* ignore */ }
+    }
+
+    function toggleLogAutoRefresh(on) {
+      if (logRefreshInterval) clearInterval(logRefreshInterval);
+      logRefreshInterval = null;
+      if (on && currentJobId) {
+        logRefreshInterval = setInterval(loadLogs, 3000);
+      }
+    }
+
+    function refreshLogs() { loadLogs(); }
+
+    async function loadFacilityNames(job) {
+      try {
+        const data = await api('GET', '/jobs/' + job.id + '/locations');
+        const locs = data.locations || [];
+        if (locs.length === 0) return;
+        const locMap = {};
+        locs.forEach(l => locMap[l.id] = l.name);
+        const container = document.getElementById('facilityChips');
+        if (!container) return;
+        container.innerHTML = (job.facilityIds || []).map(id =>
+          `<span class="facility-chip">${esc(locMap[id] || id)}</span>`
+        ).join('');
+      } catch (e) { /* ignore */ }
+    }
+
+    // ============================================================
+    // ACTIONS
+    // ============================================================
+    async function startJob(id) {
+      try {
+        await api('POST', '/jobs/' + id + '/start');
+        toast('Job started!', 'success');
+        await loadJobs();
+      } catch (err) {
+        toast('Failed to start: ' + err.message, 'error');
+      }
+    }
+
+    async function stopJob(id) {
+      try {
+        await api('POST', '/jobs/' + id + '/stop');
+        toast('Job stopped.', 'info');
+        await loadJobs();
+      } catch (err) {
+        toast('Failed to stop: ' + err.message, 'error');
+      }
+    }
+
+    async function deleteJob(id) {
+      if (!confirm('Delete this job permanently?')) return;
+      try {
+        await api('DELETE', '/jobs/' + id);
+        toast('Job deleted.', 'info');
+        if (currentView === 'detail') backToList();
+        await loadJobs();
+      } catch (err) {
+        toast('Failed to delete: ' + err.message, 'error');
+      }
+    }
+
+    async function resetJob(id) {
+      if (!confirm('Reset booking status? This will allow the job to run again.')) return;
+      try {
+        await api('POST', '/jobs/' + id + '/reset');
+        toast('Booking reset.', 'info');
+        await loadJobs();
+      } catch (err) {
+        toast('Failed to reset: ' + err.message, 'error');
+      }
+    }
+
+    async function clearJobLogs(id) {
+      try {
+        await api('DELETE', '/jobs/' + id + '/logs');
+        toast('Logs cleared.', 'info');
+        loadLogs();
+      } catch (err) {
+        toast('Failed to clear logs: ' + err.message, 'error');
+      }
+    }
+
+    // ============================================================
+    // CREATE / EDIT MODAL
+    // ============================================================
+    function showCreateModal() {
+      document.getElementById('modalTitle').textContent = 'Create New Job';
+      document.getElementById('editJobId').value = '';
+      document.getElementById('fName').value = '';
+      document.getElementById('fEmail').value = '';
+      document.getElementById('fPassword').value = '';
+      document.getElementById('fScheduleId').value = '';
+      document.getElementById('fCountry').value = 'en-ca';
+      document.getElementById('fStartDate').value = '';
+      document.getElementById('fEndDate').value = '';
+      document.getElementById('fInterval').value = '30';
+      document.getElementById('fAutoBook').value = 'true';
+      document.getElementById('jobModal').classList.add('active');
+    }
+
+    function showEditModal(id) {
+      const job = jobs.find(j => j.id === id);
+      if (!job) return;
+      document.getElementById('modalTitle').textContent = 'Edit Job';
+      document.getElementById('editJobId').value = id;
+      document.getElementById('fName').value = job.name || '';
+      document.getElementById('fEmail').value = job.email || '';
+      document.getElementById('fPassword').value = ''; // don't show stored password
+      document.getElementById('fScheduleId').value = job.scheduleId || '';
+      document.getElementById('fCountry').value = job.country || 'en-ca';
+      document.getElementById('fStartDate').value = job.startDate || '';
+      document.getElementById('fEndDate').value = job.endDate || '';
+      document.getElementById('fInterval').value = job.checkIntervalSeconds || 30;
+      document.getElementById('fAutoBook').value = job.autoBook ? 'true' : 'false';
+      document.getElementById('jobModal').classList.add('active');
+    }
+
+    function closeModal() {
+      document.getElementById('jobModal').classList.remove('active');
+    }
+
+    async function saveJob() {
+      const editId = document.getElementById('editJobId').value;
+      const data = {
+        name: document.getElementById('fName').value.trim(),
+        email: document.getElementById('fEmail').value.trim(),
+        scheduleId: document.getElementById('fScheduleId').value.trim(),
+        country: document.getElementById('fCountry').value,
+        startDate: document.getElementById('fStartDate').value,
+        endDate: document.getElementById('fEndDate').value,
+        checkIntervalSeconds: parseInt(document.getElementById('fInterval').value) || 30,
+        autoBook: document.getElementById('fAutoBook').value === 'true'
+      };
+
+      const password = document.getElementById('fPassword').value;
+      if (password) data.password = password;
+
+      if (!data.email || !data.scheduleId) {
+        toast('Email and Schedule ID are required.', 'error');
+        return;
+      }
+      if (!editId && !password) {
+        toast('Password is required for new jobs.', 'error');
+        return;
+      }
+      if (!data.startDate || !data.endDate) {
+        toast('Start and end dates are required.', 'error');
+        return;
+      }
+
+      try {
+        if (editId) {
+          await api('PUT', '/jobs/' + editId, data);
+          toast('Job updated!', 'success');
+        } else {
+          data.password = password;
+          await api('POST', '/jobs', data);
+          toast('Job created!', 'success');
+        }
+        closeModal();
+        await loadJobs();
+      } catch (err) {
+        toast('Error: ' + err.message, 'error');
+      }
+    }
+
+    // ============================================================
+    // LOCATION PICKER
+    // ============================================================
+    async function openLocationPicker(id) {
+      locationJobId = id;
+      fetchedLocations = [];
+      document.getElementById('locationContent').innerHTML =
+        '<div class="loading-overlay"><div class="spinner"></div> Logging in & fetching locations... (this may take 10-15s)</div>';
+      document.getElementById('saveLocationsBtn').disabled = true;
+      document.getElementById('locationModal').classList.add('active');
+
+      try {
+        const data = await api('POST', '/jobs/' + id + '/fetch-locations');
+        fetchedLocations = data.locations || [];
+        const job = jobs.find(j => j.id === id);
+        const selectedIds = (job?.facilityIds || []);
+
+        if (fetchedLocations.length === 0) {
+          document.getElementById('locationContent').innerHTML =
+            '<div style="text-align:center;padding:20px;color:var(--text2)">No locations found. Check your credentials and schedule ID.</div>';
+          return;
+        }
+
+        let html = '<div class="location-list">';
+        for (const loc of fetchedLocations) {
+          const checked = selectedIds.includes(loc.id) ? 'checked' : '';
+          html += `
+            <label class="location-item">
+              <input type="checkbox" value="${esc(loc.id)}" ${checked}>
+              <span>${esc(loc.name)} <span style="color:var(--text2)">(ID: ${esc(loc.id)})</span></span>
+            </label>`;
+        }
+        html += '</div>';
+        document.getElementById('locationContent').innerHTML = html;
+        document.getElementById('saveLocationsBtn').disabled = false;
+        toast('Found ' + fetchedLocations.length + ' locations!', 'success');
+      } catch (err) {
+        document.getElementById('locationContent').innerHTML =
+          `<div style="text-align:center;padding:20px;color:var(--red)">Error: ${esc(err.message)}</div>`;
+      }
+    }
+
+    function closeLocationModal() {
+      document.getElementById('locationModal').classList.remove('active');
+    }
+
+    async function saveLocations() {
+      const checkboxes = document.querySelectorAll('#locationContent input[type="checkbox"]:checked');
+      const ids = Array.from(checkboxes).map(cb => cb.value);
+
+      if (ids.length === 0) {
+        toast('Select at least one location.', 'error');
+        return;
+      }
+
+      try {
+        await api('PUT', '/jobs/' + locationJobId, { facilityIds: ids });
+        toast(ids.length + ' location(s) saved!', 'success');
+        closeLocationModal();
+        await loadJobs();
+      } catch (err) {
+        toast('Error saving locations: ' + err.message, 'error');
+      }
+    }
+
+    // ============================================================
+    // NAVIGATION
+    // ============================================================
+    function viewJob(id) {
+      currentView = 'detail';
+      currentJobId = id;
+      render();
+    }
+
+    function backToList() {
+      currentView = 'list';
+      currentJobId = null;
+      if (logRefreshInterval) clearInterval(logRefreshInterval);
+      logRefreshInterval = null;
+      render();
+    }
+
+    // ============================================================
+    // HELPERS
+    // ============================================================
+    function statusBadge(status) {
+      const labels = { running: 'Running', stopped: 'Stopped', booked: 'Booked', error: 'Error' };
+      const cls = 'badge badge-' + (status || 'stopped');
+      return `<span class="${cls}"><span class="badge-dot"></span>${labels[status] || status || 'Stopped'}</span>`;
+    }
+
+    function formatUptime(startedAt) {
+      if (!startedAt) return '—';
+      const ms = Date.now() - new Date(startedAt).getTime();
+      if (ms < 0) return '—';
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (h > 0) return h + 'h ' + m + 'm';
+      if (m > 0) return m + 'm ' + (s % 60) + 's';
+      return s + 's';
+    }
+
+    function esc(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+    loadJobs();
+
+    // Auto-refresh job list every 5 seconds
+    refreshInterval = setInterval(() => {
+      loadJobs();
+    }, 5000);
+
+    // Close modals with Escape
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        closeModal();
+        closeLocationModal();
+      }
+    });
+  </script>
+</body>
+</html>
