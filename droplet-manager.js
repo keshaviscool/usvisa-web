@@ -11,7 +11,7 @@ const CALLBACK_SECRET = process.env.CALLBACK_SECRET || 'changeme';
 const MAIN_VPS_URL = process.env.MAIN_VPS_URL; // e.g. http://1.2.3.4:3456
 
 // Droplet config - cheapest droplet, closest region to visa servers
-const DROPLET_SIZE   = process.env.DO_DROPLET_SIZE   || 's-1vcpu-512mb-10gb'; // $4/mo
+const DROPLET_SIZE   = process.env.DO_DROPLET_SIZE   || 's-1vcpu-1gb'; // $4/mo
 const DROPLET_REGION = process.env.DO_DROPLET_REGION || 'nyc3';
 const DROPLET_IMAGE  = process.env.DO_DROPLET_IMAGE  || 'ubuntu-24-04-x64';
 const REPO_URL       = process.env.REPO_URL          || 'https://github.com/keshaviscool/usvisa-web.git';
