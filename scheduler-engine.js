@@ -23,7 +23,10 @@ async function loadModules() {
 }
 
 const BASE_URL = 'https://ais.usvisa-info.com';
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
+
+// Sec-Ch-Ua header must match the User-Agent browser + version above
+const SEC_CH_UA = '"Not:A-Brand";v="99", "Brave";v="145", "Chromium";v="145"';
 
 class SchedulerInstance {
   constructor(jobId) {
@@ -84,17 +87,32 @@ class SchedulerInstance {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-GB,en;q=0.7',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
+      'Pragma': 'no-cache',
+      'sec-ch-ua': SEC_CH_UA,
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"macOS"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-GPC': '1'
     };
     if (this.csrfToken) headers['X-CSRF-Token'] = this.csrfToken;
     if (extra) Object.assign(headers, extra);
     return headers;
   }
 
-  getJsonHeaders() {
+  // Headers for JSON/XHR requests (the date & time check endpoints)
+  getJsonHeaders(scheduleId, country) {
+    const referer = (scheduleId && country)
+      ? BASE_URL + '/' + country + '/niv/schedule/' + scheduleId + '/appointment'
+      : BASE_URL;
     return this.getHeaders({
       'Accept': 'application/json, text/javascript, */*; q=0.01',
-      'X-Requested-With': 'XMLHttpRequest'
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': referer,
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin'
     });
   }
 
@@ -118,13 +136,33 @@ class SchedulerInstance {
       } catch (err) {
         lastError = err;
         this.log('debug', 'HTTP ' + method + ' FAILED: ' + err.message);
+
+        // Classify as a socket-level error (server hung up / connection refused / timeout)
+        const isSocketError = !!(err.message && (
+          err.message.includes('socket hang up') ||
+          err.message.includes('ECONNRESET') ||
+          err.message.includes('ECONNREFUSED') ||
+          err.message.includes('ETIMEDOUT') ||
+          err.message.includes('network timeout') ||
+          err.message.includes('aborted') ||
+          err.type === 'request-timeout'
+        ));
+        if (isSocketError) err._isSocketError = true;
+
         if (attempt < maxRetries) {
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000) + Math.random() * 1000;
-          this.log('warn', 'Request failed (' + err.message + '). Retry ' + attempt + '/' + maxRetries + ' in ' + Math.round(delay) + 'ms...');
+          // Socket errors get longer delays — these are likely server-side blocks,
+          // hammering faster just deepens the block.
+          const baseDelay = isSocketError
+            ? Math.min(5000 * Math.pow(2, attempt - 1), 60000) // 5s → 10s → 20s
+            : Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s → 2s  → 4s
+          const delay = baseDelay + Math.random() * 2000;
+          this.log('warn', 'Request failed (' + err.message + '). Retry ' + attempt + '/' + maxRetries + ' in ' + Math.round(delay / 1000) + 's...');
           await this.sleep(delay);
         }
       }
     }
+    // Tag so callers can detect a fully-exhausted socket error
+    if (lastError) lastError._retriesExhausted = true;
     throw lastError;
   }
 
@@ -165,7 +203,16 @@ class SchedulerInstance {
       headers: {
         'User-Agent': USER_AGENT,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'Accept-Language': 'en-GB,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'sec-ch-ua': SEC_CH_UA,
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-GPC': '1'
       },
       redirect: 'follow'
     });
@@ -201,12 +248,21 @@ class SchedulerInstance {
       headers: {
         'User-Agent': USER_AGENT,
         'Accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Language': 'en-GB,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         'Origin': BASE_URL,
         'Referer': loginUrl,
         'X-CSRF-Token': this.csrfToken,
-        'X-Requested-With': 'XMLHttpRequest'
+        'X-Requested-With': 'XMLHttpRequest',
+        'sec-ch-ua': SEC_CH_UA,
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-GPC': '1'
       },
       body: formData.toString(),
       redirect: 'manual'
@@ -342,7 +398,7 @@ class SchedulerInstance {
   // ============================================================
   async checkDates(facilityId) {
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/days/' + facilityId + '.json?appointments[expedite]=false';
-    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(), redirect: 'manual' });
+    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(this.config.scheduleId, this.config.country), redirect: 'manual' });
 
     if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
     if (resp.status === 429) throw new Error('RATE_LIMITED');
@@ -368,7 +424,7 @@ class SchedulerInstance {
   // ============================================================
   async checkTimes(facilityId, date) {
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/times/' + facilityId + '.json?date=' + date + '&appointments[expedite]=false';
-    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(), redirect: 'manual' });
+    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(this.config.scheduleId, this.config.country), redirect: 'manual' });
 
     if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
     if (!resp.ok) throw new Error('HTTP_' + resp.status);
@@ -485,6 +541,7 @@ class SchedulerInstance {
     this.health.totalChecks++;
     this.health.lastCheckAt = new Date().toISOString();
     let anySuccess = false;
+    let socketFailCount = 0;  // how many facilities returned exhausted socket errors
     let lastError = null;
 
     const facilityIds = this.config.facilityIds;
@@ -576,6 +633,29 @@ class SchedulerInstance {
 
       } catch (err) {
         lastError = err.message;
+
+        // ── Socket hang-up / connection reset — possible IP-level block ──
+        if (err._isSocketError && err._retriesExhausted) {
+          socketFailCount++;
+          this.log('warn', facName + ': socket error after all retries (' + socketFailCount + '/' + facilityIds.length + ' facilities affected)');
+
+          // Every single facility is hanging up → we are being blocked at IP level
+          if (socketFailCount >= facilityIds.length) {
+            this.log('error', '🚫 ALL facilities returning socket errors — IP-level block detected.');
+            this.health.failedChecks++;
+            this.health.consecutiveFailures++;
+            this.health.lastError = 'IP_BLOCKED';
+            this.syncHealth();
+            return 'IP_BLOCKED';
+          }
+
+          // Partial block: breathe before hitting the next facility
+          const pauseMs = 8000 + Math.random() * 4000; // 8–12 s
+          this.log('info', 'Pausing ' + Math.round(pauseMs / 1000) + 's before next facility...');
+          await this.sleep(pauseMs);
+          continue;
+        }
+
         this.log('error', facName + ': ' + err.message);
 
         if (err.message === 'SESSION_EXPIRED') {
@@ -589,8 +669,8 @@ class SchedulerInstance {
             return 'LOGIN_FAILED';
           }
         } else if (err.message === 'RATE_LIMITED') {
-          this.log('warn', 'Rate limited! Waiting 60 seconds...');
-          await this.sleep(60000);
+          this.log('warn', '🚦 Rate limited (429)! Waiting 5 minutes...');
+          await this.sleep(5 * 60 * 1000);
         } else if (err.message === 'CSRF_EXPIRED') {
           this.log('warn', 'CSRF expired. Refreshing...');
           try { await this.fetchLocations(); } catch (e) { /* ignore */ }
@@ -682,6 +762,15 @@ class SchedulerInstance {
   }
 
   async _runLoop() {
+    // Cooldown tiers when IP_BLOCKED is detected (escalates on repeated blocks)
+    const BLOCK_COOLDOWNS = [
+       5 * 60 * 1000,  //  5 min  — 1st block
+      15 * 60 * 1000,  // 15 min  — 2nd
+      30 * 60 * 1000,  // 30 min  — 3rd
+      60 * 60 * 1000,  // 60 min  — 4th+
+    ];
+    let blockCount = 0;
+
     while (this.running) {
       try {
         const result = await this.runCheckCycle();
@@ -695,6 +784,25 @@ class SchedulerInstance {
 
         if (result === 'STOPPED') {
           break;
+        }
+
+        if (result === 'IP_BLOCKED') {
+          const cooldownMs = BLOCK_COOLDOWNS[Math.min(blockCount, BLOCK_COOLDOWNS.length - 1)];
+          blockCount++;
+          this.log('warn', '🕐 IP block #' + blockCount + ' — cooling down for ' + Math.round(cooldownMs / 60000) + ' min...');
+          db.updateJob(this.jobId, { lastError: 'IP blocked — cooldown ' + Math.round(cooldownMs / 60000) + 'min (#' + blockCount + ')' });
+          await this.sleep(cooldownMs);
+
+          // Fresh session after cooldown — new cookies often clear the block
+          this.log('info', 'Cooldown done. Re-establishing session...');
+          try {
+            await this.login();
+            this.log('success', 'Session refreshed after cooldown.');
+            this.health.consecutiveFailures = 0;
+          } catch (e) {
+            this.log('error', 'Re-login after cooldown failed: ' + e.message);
+          }
+          continue;
         }
 
         if (result === 'LOGIN_FAILED') {
@@ -732,11 +840,11 @@ class SchedulerInstance {
 
       if (!this.running) break;
 
-      // Wait for next cycle
+      // Wait for next cycle with ±10% jitter so requests never land on a fixed schedule
       const interval = (this.config.checkIntervalSeconds || 30) * 1000;
       const jitter = interval * 0.1 * (Math.random() - 0.5);
       const waitMs = Math.max(3000, interval + jitter);
-      // await this.sleep(waitMs);
+      await this.sleep(waitMs);
     }
 
     this.syncHealth();
