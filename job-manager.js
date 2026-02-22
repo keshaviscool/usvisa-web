@@ -219,13 +219,15 @@ class JobManager {
       requestTimeoutMs: 20000,
       maxRetries: 3
     };
-    tempInstance.resetSession();
-
-    // Login
+    // Login (initPage() is called internally by login() — no resetSession needed)
     await tempInstance.login();
 
     // Fetch locations
     const locations = await tempInstance.fetchLocations();
+
+    // Close the browser page — we're done with this temp instance
+    await tempInstance.closePage();
+
     return locations;
   }
 
