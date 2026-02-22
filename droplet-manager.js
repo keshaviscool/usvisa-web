@@ -55,24 +55,54 @@ function doRequest(method, path, body) {
 }
 
 // ── Build cloud-init user_data script ──
+// ...existing code...
+
 function buildUserData(jobId, jobConfig) {
-  // Serialize the job config as base64 to safely pass through shell
   const configB64 = Buffer.from(JSON.stringify(jobConfig)).toString('base64');
 
   return `#!/bin/bash
 set -e
+export DEBIAN_FRONTEND=noninteractive
 
 # ── System setup ──
-export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq git curl
 
-# ── Install Chromium dependencies for Puppeteer ──
+# ── Install Chromium dependencies for Puppeteer (Ubuntu 24.04 compatible) ──
 apt-get install -y -qq \
-  libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-  libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-  libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
-  libx11-xcb1 fonts-liberation libappindicator3-1 xdg-utils
+  ca-certificates \
+  fonts-liberation \
+  libasound2t64 \
+  libatk-bridge2.0-0t64 \
+  libatk1.0-0t64 \
+  libcairo2 \
+  libcups2t64 \
+  libdbus-1-3 \
+  libdrm2 \
+  libexpat1 \
+  libgbm1 \
+  libglib2.0-0t64 \
+  libgtk-3-0t64 \
+  libnspr4 \
+  libnss3 \
+  libpango-1.0-0 \
+  libpangocairo-1.0-0 \
+  libx11-6 \
+  libx11-xcb1 \
+  libxcb1 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxext6 \
+  libxfixes3 \
+  libxrandr2 \
+  libxshmfence1 \
+  libxss1 \
+  libxtst6 \
+  libxkbcommon0 \
+  libappindicator3-1 \
+  wget \
+  xdg-utils \
+  --fix-missing
 
 # ── Install Node.js 20 ──
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -86,7 +116,7 @@ cd /root
 git clone ${REPO_URL} app
 cd /root/app
 
-# ── Install deps ──
+# ── Install npm deps (Puppeteer will auto-download Chrome) ──
 npm install --quiet
 
 # ── Write env file ──
@@ -102,6 +132,8 @@ pm2 start /root/app/agent/agent.js --name visa-agent-${jobId} --no-autorestart
 pm2 save
 `;
 }
+
+// ...existing code...
 
 // ── Create a droplet for a job ──
 async function createDroplet(jobId, jobConfig) {
