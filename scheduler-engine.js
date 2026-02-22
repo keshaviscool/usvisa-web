@@ -1,40 +1,65 @@
 // ============================================================
-// SCHEDULER ENGINE - Isolated per-job scheduler instance
-// Refactored from standalone/scheduler.js to support multiple
-// concurrent instances with independent sessions.
+// SCHEDULER ENGINE - Puppeteer-based per-job scheduler
+// Uses a real headless Chrome browser for all HTTP requests,
+// giving us authentic TLS fingerprints, headers, and cookies.
 // ============================================================
 
 const db = require('./database');
-
-// ESM module references (shared across instances)
-let fetchModule, CookieJarClass, fetchCookieFactory, cheerioModule;
-let modulesLoaded = false;
-
-async function loadModules() {
-  if (modulesLoaded) return;
-  const fm = await import('node-fetch');
-  fetchModule = fm.default;
-  const tc = await import('tough-cookie');
-  CookieJarClass = tc.CookieJar;
-  const fc = await import('fetch-cookie');
-  fetchCookieFactory = fc.default;
-  cheerioModule = await import('cheerio');
-  modulesLoaded = true;
-}
+const puppeteer = require('puppeteer');
 
 const BASE_URL = 'https://ais.usvisa-info.com';
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 
-// Sec-Ch-Ua header must match the User-Agent browser + version above
-const SEC_CH_UA = '"Not:A-Brand";v="99", "Brave";v="145", "Chromium";v="145"';
+// Shared browser instance (lazy-launched, reused across jobs)
+let sharedBrowser = null;
+let browserLaunchPromise = null;
+
+async function launchBrowser() {
+  if (sharedBrowser && sharedBrowser.connected) return sharedBrowser;
+  if (browserLaunchPromise) return browserLaunchPromise;
+
+  browserLaunchPromise = (async () => {
+    const b = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--window-size=1920,1080'
+      ],
+      defaultViewport: { width: 1920, height: 1080 }
+    });
+    b.on('disconnected', () => { sharedBrowser = null; });
+    sharedBrowser = b;
+    browserLaunchPromise = null;
+    return b;
+  })();
+
+  return browserLaunchPromise;
+}
+
+// loadModules kept for backward compat with agent.js
+async function loadModules() {
+  // No-op — puppeteer is loaded via require()
+}
 
 class SchedulerInstance {
   constructor(jobId) {
     this.jobId = jobId;
     this.running = false;
     this.stopping = false;
-    this.cookieJar = null;
-    this.fetchWithCookies = null;
+    this.page = null;
     this.csrfToken = null;
     this.config = null;
     this.loopPromise = null;
@@ -59,7 +84,6 @@ class SchedulerInstance {
     if (level !== 'debug') {
       console.log('[' + ts + '] [Job:' + this.jobId + '] ' + (prefixes[level] || '') + ' ' + msg);
     }
-    // Save to DB (skip debug to keep DB lean)
     try {
       db.addLog(this.jobId, level, msg);
     } catch (e) { /* ignore DB errors in logging */ }
@@ -80,96 +104,9 @@ class SchedulerInstance {
     } catch (e) { /* ignore */ }
   }
 
-  // ── HTTP Helpers ──
-  getHeaders(extra) {
-    const headers = {
-      'User-Agent': USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-GB,en;q=0.7',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'sec-ch-ua': SEC_CH_UA,
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"macOS"',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'same-origin',
-      'Sec-GPC': '1'
-    };
-    if (this.csrfToken) headers['X-CSRF-Token'] = this.csrfToken;
-    if (extra) Object.assign(headers, extra);
-    return headers;
-  }
-
-  // Headers for JSON/XHR requests (the date & time check endpoints)
-  getJsonHeaders(scheduleId, country) {
-    const referer = (scheduleId && country)
-      ? BASE_URL + '/' + country + '/niv/schedule/' + scheduleId + '/appointment'
-      : BASE_URL;
-    return this.getHeaders({
-      'Accept': 'application/json, text/javascript, */*; q=0.01',
-      'X-Requested-With': 'XMLHttpRequest',
-      'Referer': referer,
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin'
-    });
-  }
-
-  async fetchWithRetry(url, options, maxRetries) {
-    maxRetries = maxRetries || this.config.maxRetries || 3;
-    let attempt = 0;
-    let lastError;
-    const method = (options && options.method) || 'GET';
-
-    while (attempt < maxRetries) {
-      attempt++;
-      this.log('debug', 'HTTP ' + method + ' [attempt ' + attempt + '/' + maxRetries + ']');
-      try {
-        const controller = new AbortController();
-        const timeoutMs = this.config.requestTimeoutMs || 20000;
-        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-        const opts = Object.assign({}, options || {}, { signal: controller.signal });
-        const response = await this.fetchWithCookies(url, opts);
-        clearTimeout(timeoutId);
-        return response;
-      } catch (err) {
-        lastError = err;
-        this.log('debug', 'HTTP ' + method + ' FAILED: ' + err.message);
-
-        // Classify as a socket-level error (server hung up / connection refused / timeout)
-        const isSocketError = !!(err.message && (
-          err.message.includes('socket hang up') ||
-          err.message.includes('ECONNRESET') ||
-          err.message.includes('ECONNREFUSED') ||
-          err.message.includes('ETIMEDOUT') ||
-          err.message.includes('network timeout') ||
-          err.message.includes('aborted') ||
-          err.type === 'request-timeout'
-        ));
-        if (isSocketError) err._isSocketError = true;
-
-        if (attempt < maxRetries) {
-          // Socket errors get longer delays — these are likely server-side blocks,
-          // hammering faster just deepens the block.
-          const baseDelay = isSocketError
-            ? Math.min(5000 * Math.pow(2, attempt - 1), 60000) // 5s → 10s → 20s
-            : Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s → 2s  → 4s
-          const delay = baseDelay + Math.random() * 2000;
-          this.log('warn', 'Request failed (' + err.message + '). Retry ' + attempt + '/' + maxRetries + ' in ' + Math.round(delay / 1000) + 's...');
-          await this.sleep(delay);
-        }
-      }
-    }
-    // Tag so callers can detect a fully-exhausted socket error
-    if (lastError) lastError._retriesExhausted = true;
-    throw lastError;
-  }
-
   sleep(ms) {
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, ms);
-      // Store reference so we can cancel on stop
       this._sleepTimer = timer;
     });
   }
@@ -181,211 +118,269 @@ class SchedulerInstance {
     }
   }
 
-  // ── Reset session ──
-  resetSession() {
-    this.cookieJar = new CookieJarClass();
-    this.fetchWithCookies = fetchCookieFactory(fetchModule, this.cookieJar);
+  // ============================================================
+  // BROWSER PAGE MANAGEMENT
+  // ============================================================
+  async initPage() {
+    const browser = await launchBrowser();
+    if (this.page && !this.page.isClosed()) {
+      try { await this.page.close(); } catch (e) { /* ignore */ }
+    }
+    this.page = await browser.newPage();
+
+    // Block images, stylesheets, fonts to save bandwidth & speed
+    await this.page.setRequestInterception(true);
+    this.page.on('request', (req) => {
+      const type = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     this.csrfToken = null;
   }
 
+  async closePage() {
+    if (this.page && !this.page.isClosed()) {
+      try { await this.page.close(); } catch (e) { /* ignore */ }
+    }
+    this.page = null;
+  }
+
+  // ── Extract CSRF token from the current page ──
+  async extractCsrf() {
+    try {
+      const token = await this.page.evaluate(() => {
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        if (meta) return meta.getAttribute('content');
+        const input = document.querySelector('input[name="authenticity_token"]');
+        if (input) return input.value;
+        return null;
+      });
+      if (token) this.csrfToken = token;
+      return token;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // ============================================================
-  // LOGIN
+  // IN-BROWSER FETCH WITH RETRY
+  // Executes fetch() inside Chrome — real TLS, real cookies
+  // ============================================================
+  async browserFetch(url, options, maxRetries) {
+    maxRetries = maxRetries || (this.config && this.config.maxRetries) || 3;
+    let attempt = 0;
+    let lastError;
+    const method = (options && options.method) || 'GET';
+    const timeoutMs = (this.config && this.config.requestTimeoutMs) || 20000;
+
+    while (attempt < maxRetries) {
+      attempt++;
+      this.log('debug', 'fetch ' + method + ' ' + url + ' [attempt ' + attempt + '/' + maxRetries + ']');
+      try {
+        const result = await this.page.evaluate(async (fetchUrl, fetchMethod, fetchHeaders, fetchBody, fetchTimeout) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), fetchTimeout);
+          try {
+            const opts = {
+              method: fetchMethod,
+              headers: fetchHeaders || {},
+              signal: controller.signal,
+              credentials: 'include'
+            };
+            if (fetchBody) opts.body = fetchBody;
+            const resp = await fetch(fetchUrl, opts);
+            clearTimeout(timer);
+            const text = await resp.text();
+            return {
+              ok: resp.ok,
+              status: resp.status,
+              url: resp.url,
+              text: text,
+              redirected: resp.redirected
+            };
+          } catch (err) {
+            clearTimeout(timer);
+            return { error: err.message || 'fetch failed' };
+          }
+        }, url, method, options.headers || {}, options.body || null, timeoutMs);
+
+        if (result.error) {
+          throw new Error(result.error);
+        }
+        return result;
+      } catch (err) {
+        lastError = err;
+        this.log('debug', 'fetch ' + method + ' FAILED: ' + err.message);
+
+        const isSocketError = !!(err.message && (
+          err.message.includes('socket hang up') ||
+          err.message.includes('net::ERR_') ||
+          err.message.includes('ECONNRESET') ||
+          err.message.includes('ECONNREFUSED') ||
+          err.message.includes('ETIMEDOUT') ||
+          err.message.includes('aborted') ||
+          err.message.includes('TimeoutError') ||
+          err.message.includes('Navigation timeout') ||
+          err.message.includes('Execution context was destroyed') ||
+          err.message.includes('Protocol error') ||
+          err.message.includes('Failed to fetch')
+        ));
+        if (isSocketError) lastError._isSocketError = true;
+
+        if (attempt < maxRetries) {
+          const baseDelay = isSocketError
+            ? Math.min(5000 * Math.pow(2, attempt - 1), 60000)
+            : Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+          const delay = baseDelay + Math.random() * 2000;
+          this.log('warn', 'Request failed (' + err.message + '). Retry ' + attempt + '/' + maxRetries + ' in ' + Math.round(delay / 1000) + 's...');
+          await this.sleep(delay);
+        }
+      }
+    }
+    if (lastError) lastError._retriesExhausted = true;
+    throw lastError;
+  }
+
+  // ============================================================
+  // LOGIN — real browser navigation (authentic Chrome TLS)
   // ============================================================
   async login() {
     this.log('info', 'Logging in as ' + this.config.email + '...');
-    this.resetSession();
+    await this.initPage();
 
     const loginUrl = BASE_URL + '/' + this.config.country + '/niv/users/sign_in';
 
-    // Step 1: GET login page for CSRF token
-    const pageResp = await this.fetchWithCookies(loginUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-GB,en;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'sec-ch-ua': SEC_CH_UA,
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-GPC': '1'
-      },
-      redirect: 'follow'
-    });
-    const html = await pageResp.text();
-    this.log('info', 'GET login page: status=' + pageResp.status);
+    // Step 1: Navigate to login page
+    try {
+      await this.page.goto(loginUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    } catch (err) {
+      throw new Error('Could not load login page: ' + err.message);
+    }
+    this.log('info', 'Login page loaded.');
 
-    // Extract CSRF
-    let csrfMatch = html.match(/name="authenticity_token"[^>]*value="([^"]+)"/);
-    this.csrfToken = csrfMatch ? csrfMatch[1] : null;
-    if (!this.csrfToken) {
-      const metaMatch = html.match(/meta name="csrf-token" content="([^"]+)"/);
-      this.csrfToken = metaMatch ? metaMatch[1] : null;
-    }
-    if (!this.csrfToken) {
-      const $ = cheerioModule.load(html);
-      this.csrfToken = $('meta[name="csrf-token"]').attr('content') || $('input[name="authenticity_token"]').val();
-    }
-    if (!this.csrfToken) {
+    // Step 2: Extract CSRF
+    const csrf = await this.extractCsrf();
+    if (!csrf) {
+      const html = await this.page.content();
+      if (html.includes('try again later') || html.includes('Too many')) {
+        throw new Error('Login rate limited. Try again later.');
+      }
       throw new Error('Could not extract CSRF token from login page');
     }
     this.log('info', 'Got CSRF token.');
 
-    // Step 2: POST login
-    const formData = new URLSearchParams();
-    formData.append('utf8', '✓');
-    formData.append('user[email]', this.config.email);
-    formData.append('user[password]', this.config.password);
-    formData.append('policy_confirmed', '1');
-    formData.append('commit', 'Sign In');
-
-    const loginResp = await this.fetchWithCookies(loginUrl, {
-      method: 'POST',
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript, */*; q=0.01',
-        'Accept-Language': 'en-GB,en;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Origin': BASE_URL,
-        'Referer': loginUrl,
-        'X-CSRF-Token': this.csrfToken,
-        'X-Requested-With': 'XMLHttpRequest',
-        'sec-ch-ua': SEC_CH_UA,
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-GPC': '1'
-      },
-      body: formData.toString(),
-      redirect: 'manual'
-    });
-
-    const statusCode = loginResp.status;
-    this.log('info', 'Login POST: status=' + statusCode);
-    const responseBody = await loginResp.text();
-
-    if (statusCode === 200) {
-      const locationMatch = responseBody.match(/window\.location\s*=\s*["']([^"']+)["']/);
-      if (locationMatch) {
-        const redirectPath = locationMatch[1];
-        const redirectUrl = redirectPath.startsWith('http') ? redirectPath : (BASE_URL + redirectPath);
-        if (!redirectUrl.includes('sign_in')) {
-          const redirectResp = await this.fetchWithCookies(redirectUrl, {
-            method: 'GET',
-            headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Referer': loginUrl },
-            redirect: 'follow'
-          });
-          const redirectHtml = await redirectResp.text();
-          const newCsrf = redirectHtml.match(/meta name="csrf-token" content="([^"]+)"/);
-          if (newCsrf) this.csrfToken = newCsrf[1];
-          this.log('success', 'Login successful!');
-          this.health.reloginCount++;
-          return true;
-        }
-      }
-
-      if (responseBody.includes('Invalid Email or password') || responseBody.includes('invalid email or password')) {
-        throw new Error('Invalid email or password.');
-      }
-      if (responseBody.includes('try again later') || responseBody.includes('Too many')) {
-        throw new Error('Login rate limited. Try again later.');
-      }
-      if (responseBody.includes('sign_out') || responseBody.includes('dashboard') || responseBody.includes('Groups')) {
-        this.log('success', 'Login successful!');
-        this.health.reloginCount++;
-        return true;
-      }
-
-      // Verify by accessing account page
-      this.log('info', 'Verifying login...');
-      const verifyUrl = BASE_URL + '/' + this.config.country + '/niv/groups/' + this.config.scheduleId;
-      const verifyResp = await this.fetchWithCookies(verifyUrl, {
-        method: 'GET',
-        headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Referer': loginUrl },
-        redirect: 'follow'
+    // Step 3: Fill and submit login form
+    try {
+      // Clear fields first in case of previous values
+      await this.page.evaluate(() => {
+        const emailEl = document.querySelector('input[name="user[email]"]');
+        const passEl = document.querySelector('input[name="user[password]"]');
+        if (emailEl) emailEl.value = '';
+        if (passEl) passEl.value = '';
       });
-      const verifyHtml = await verifyResp.text();
-      const verifyFinalUrl = verifyResp.url || verifyUrl;
 
-      if (!verifyFinalUrl.includes('sign_in') && verifyResp.status === 200) {
-        const verifyCsrf = verifyHtml.match(/meta name="csrf-token" content="([^"]+)"/);
-        if (verifyCsrf) this.csrfToken = verifyCsrf[1];
-        this.log('success', 'Login verified!');
-        this.health.reloginCount++;
-        return true;
+      await this.page.type('input[name="user[email]"]', this.config.email, { delay: 30 });
+      await this.page.type('input[name="user[password]"]', this.config.password, { delay: 30 });
+
+      // Check policy_confirmed checkbox if present
+      const policyCheckbox = await this.page.$('input[name="policy_confirmed"]');
+      if (policyCheckbox) {
+        const isChecked = await this.page.evaluate(el => el.checked, policyCheckbox);
+        if (!isChecked) await policyCheckbox.click();
       }
-      throw new Error('Login failed - could not access protected pages.');
+
+      // Click submit
+      await Promise.all([
+        this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
+        this.page.click('input[type="submit"], button[type="submit"]')
+      ]);
+    } catch (err) {
+      throw new Error('Login form submission failed: ' + err.message);
     }
 
-    // Handle redirects
-    if (statusCode === 302 || statusCode === 301 || statusCode === 303) {
-      let redirectUrl2 = loginResp.headers.get('location');
-      if (redirectUrl2) {
-        if (redirectUrl2.startsWith('/')) redirectUrl2 = BASE_URL + redirectUrl2;
-        const rResp = await this.fetchWithCookies(redirectUrl2, {
-          method: 'GET',
-          headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Referer': loginUrl },
-          redirect: 'follow'
-        });
-        const rHtml = await rResp.text();
-        const rUrl = rResp.url || redirectUrl2;
-        const rCsrf = rHtml.match(/meta name="csrf-token" content="([^"]+)"/);
-        if (rCsrf) this.csrfToken = rCsrf[1];
-        if (!rUrl.includes('sign_in')) {
-          this.log('success', 'Login successful!');
-          this.health.reloginCount++;
-          return true;
+    // Wait a moment for any JS redirects
+    await this.sleep(2000);
+
+    // Step 4: Check if login succeeded
+    const currentUrl = this.page.url();
+    const pageContent = await this.page.content();
+
+    if (pageContent.includes('Invalid Email or password') || pageContent.includes('invalid email or password')) {
+      throw new Error('Invalid email or password.');
+    }
+    if (pageContent.includes('try again later') || pageContent.includes('Too many')) {
+      throw new Error('Login rate limited. Try again later.');
+    }
+
+    if (currentUrl.includes('sign_in')) {
+      // Still on login page — try to navigate to the group page to verify
+      this.log('info', 'Still on login page, attempting redirect...');
+      try {
+        const groupUrl = BASE_URL + '/' + this.config.country + '/niv/groups/' + this.config.scheduleId;
+        await this.page.goto(groupUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        const afterUrl = this.page.url();
+        if (afterUrl.includes('sign_in')) {
+          throw new Error('Login failed — redirected back to sign in');
         }
-        if (rHtml.includes('Invalid Email or password')) {
-          throw new Error('Invalid email or password.');
-        }
+      } catch (navErr) {
+        if (navErr.message.includes('Login failed')) throw navErr;
+        throw new Error('Login failed: ' + navErr.message);
       }
     }
 
-    throw new Error('Login failed - status ' + statusCode);
+    // Refresh CSRF from the authenticated page
+    await this.extractCsrf();
+
+    this.log('success', 'Login successful! (Puppeteer browser)');
+    this.health.reloginCount++;
+    return true;
   }
 
   // ============================================================
-  // FETCH LOCATIONS
+  // FETCH LOCATIONS — parse the appointment page
   // ============================================================
   async fetchLocations() {
     this.log('info', 'Fetching available locations...');
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
-    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getHeaders(), redirect: 'follow' });
-    const html = await resp.text();
 
-    if (resp.url && resp.url.includes('sign_in')) {
+    try {
+      await this.page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    } catch (err) {
+      throw new Error('Could not load appointment page: ' + err.message);
+    }
+
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('sign_in')) {
       throw new Error('SESSION_EXPIRED');
     }
 
-    const $ = cheerioModule.load(html);
-    const newCsrf = $('meta[name="csrf-token"]').attr('content');
-    if (newCsrf) this.csrfToken = newCsrf;
+    // Refresh CSRF from appointment page
+    await this.extractCsrf();
 
-    const locations = [];
-    $('select[name="appointments[consulate_appointment][facility_id]"] option').each(function () {
-      const val = $(this).val();
-      const name = $(this).text().trim();
-      if (val && val.trim() !== '') {
-        locations.push({ id: val, name: name });
-      }
+    // Extract locations from select dropdown
+    const locations = await this.page.evaluate(() => {
+      const select = document.querySelector('select[name="appointments[consulate_appointment][facility_id]"]');
+      if (!select) return [];
+      const options = [];
+      select.querySelectorAll('option').forEach(opt => {
+        const val = opt.value ? opt.value.trim() : '';
+        const name = opt.textContent ? opt.textContent.trim() : '';
+        if (val) options.push({ id: val, name: name });
+      });
+      return options;
     });
 
     if (locations.length === 0) {
+      const html = await this.page.content();
       if (html.includes('sign_in') || html.includes('Sign In')) {
         throw new Error('SESSION_EXPIRED');
       }
     }
 
-    // Cache locations in DB
     if (locations.length > 0) {
       db.cacheLocations(this.jobId, locations);
     }
@@ -394,83 +389,100 @@ class SchedulerInstance {
   }
 
   // ============================================================
-  // CHECK DATES
+  // CHECK DATES — in-browser fetch (real Chrome TLS + cookies)
   // ============================================================
   async checkDates(facilityId) {
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/days/' + facilityId + '.json?appointments[expedite]=false';
-    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(this.config.scheduleId, this.config.country), redirect: 'manual' });
+
+    const resp = await this.browserFetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRF-Token': this.csrfToken || ''
+      }
+    });
 
     if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
     if (resp.status === 429) throw new Error('RATE_LIMITED');
     if (resp.status === 422) throw new Error('CSRF_EXPIRED');
     if (!resp.ok) throw new Error('HTTP_' + resp.status);
 
-    const text = await resp.text();
     try {
-      const data = JSON.parse(text);
+      const data = JSON.parse(resp.text);
       if (!Array.isArray(data)) {
-        if (text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
+        if (resp.text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
         return [];
       }
       return data;
     } catch (e) {
-      if (text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
+      if (resp.text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
       throw new Error('PARSE_ERROR: ' + e.message);
     }
   }
 
   // ============================================================
-  // CHECK TIMES
+  // CHECK TIMES — in-browser fetch
   // ============================================================
   async checkTimes(facilityId, date) {
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/times/' + facilityId + '.json?date=' + date + '&appointments[expedite]=false';
-    const resp = await this.fetchWithRetry(url, { method: 'GET', headers: this.getJsonHeaders(this.config.scheduleId, this.config.country), redirect: 'manual' });
+
+    const resp = await this.browserFetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRF-Token': this.csrfToken || ''
+      }
+    });
 
     if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
     if (!resp.ok) throw new Error('HTTP_' + resp.status);
 
-    const data = await resp.json();
+    const data = JSON.parse(resp.text);
     const times = (data && data.available_times) ? data.available_times : (Array.isArray(data) ? data : []);
     return times;
   }
 
   // ============================================================
-  // BOOK APPOINTMENT
+  // BOOK APPOINTMENT — in-browser POST
   // ============================================================
   async bookAppointment(facilityId, date, time, attemptNum) {
     attemptNum = attemptNum || 1;
     this.log('info', '📝 Booking attempt #' + attemptNum + ': facility=' + facilityId + ' date=' + date + ' time=' + time);
 
+    // Refresh CSRF if needed — visit the appointment page
     if (!this.csrfToken || attemptNum > 1) {
       const pageUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
-      const pageResp = await this.fetchWithRetry(pageUrl, { method: 'GET', headers: this.getHeaders(), redirect: 'follow' });
-      const pageHtml = await pageResp.text();
-      const $ = cheerioModule.load(pageHtml);
-      const freshCsrf = $('input[name="authenticity_token"]').val() || $('meta[name="csrf-token"]').attr('content');
-      if (freshCsrf) this.csrfToken = freshCsrf;
+      try {
+        await this.page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await this.extractCsrf();
+      } catch (e) {
+        this.log('warn', 'Could not refresh CSRF: ' + e.message);
+      }
     }
 
-    const formData = new URLSearchParams();
-    formData.append('utf8', '\u2713');
-    formData.append('authenticity_token', this.csrfToken);
-    formData.append('appointments[consulate_appointment][facility_id]', facilityId);
-    formData.append('appointments[consulate_appointment][date]', date);
-    formData.append('appointments[consulate_appointment][time]', time);
-    formData.append('confirmed', 'Confirm');
-
     const bookUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
-    const resp = await this.fetchWithRetry(bookUrl, {
+
+    const formBody = new URLSearchParams();
+    formBody.append('utf8', '\u2713');
+    formBody.append('authenticity_token', this.csrfToken || '');
+    formBody.append('appointments[consulate_appointment][facility_id]', facilityId);
+    formBody.append('appointments[consulate_appointment][date]', date);
+    formBody.append('appointments[consulate_appointment][time]', time);
+    formBody.append('confirmed', 'Confirm');
+
+    const resp = await this.browserFetch(bookUrl, {
       method: 'POST',
-      headers: this.getHeaders({
+      headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'X-Requested-With': 'XMLHttpRequest',
-        'Referer': bookUrl
-      }),
-      body: formData.toString(),
-      redirect: 'follow'
+        'X-CSRF-Token': this.csrfToken || ''
+      },
+      body: formBody.toString()
     }, 1);
 
-    const html = await resp.text();
+    const html = resp.text;
     const lowerHtml = html.toLowerCase();
 
     let confirmed = false;
@@ -541,7 +553,7 @@ class SchedulerInstance {
     this.health.totalChecks++;
     this.health.lastCheckAt = new Date().toISOString();
     let anySuccess = false;
-    let socketFailCount = 0;  // how many facilities returned exhausted socket errors
+    let socketFailCount = 0;
     let lastError = null;
 
     const facilityIds = this.config.facilityIds;
@@ -564,6 +576,7 @@ class SchedulerInstance {
       try {
         const dates = await this.checkDates(facId);
         anySuccess = true;
+        socketFailCount = 0; // reset on success
         const matching = this.filterDatesInRange(dates);
 
         if (matching.length > 0) {
@@ -595,7 +608,6 @@ class SchedulerInstance {
                     this.log('success', '═══════════════════════════════════════════');
                     booked = true;
 
-                    // Save booking info to DB
                     db.updateJob(this.jobId, {
                       status: 'booked',
                       bookedDate: result.date,
@@ -639,7 +651,6 @@ class SchedulerInstance {
           socketFailCount++;
           this.log('warn', facName + ': socket error after all retries (' + socketFailCount + '/' + facilityIds.length + ' facilities affected)');
 
-          // Every single facility is hanging up → we are being blocked at IP level
           if (socketFailCount >= facilityIds.length) {
             this.log('error', '🚫 ALL facilities returning socket errors — IP-level block detected.');
             this.health.failedChecks++;
@@ -649,8 +660,7 @@ class SchedulerInstance {
             return 'IP_BLOCKED';
           }
 
-          // Partial block: breathe before hitting the next facility
-          const pauseMs = 8000 + Math.random() * 4000; // 8–12 s
+          const pauseMs = 8000 + Math.random() * 4000;
           this.log('info', 'Pausing ' + Math.round(pauseMs / 1000) + 's before next facility...');
           await this.sleep(pauseMs);
           continue;
@@ -662,7 +672,7 @@ class SchedulerInstance {
           this.log('warn', 'Session expired. Re-logging in...');
           try {
             await this.login();
-            i--; // retry this facility
+            i--;
             continue;
           } catch (loginErr) {
             this.log('error', 'Re-login failed: ' + loginErr.message);
@@ -687,7 +697,6 @@ class SchedulerInstance {
       this.health.lastError = lastError;
     }
 
-    // Sync to DB every 5 cycles
     if (this.health.totalChecks % 5 === 0) {
       this.syncHealth();
     }
@@ -696,7 +705,7 @@ class SchedulerInstance {
   }
 
   // ============================================================
-  // START - main loop
+  // START — main entry point
   // ============================================================
   async start() {
     if (this.running) {
@@ -733,17 +742,16 @@ class SchedulerInstance {
     this.health.startedAt = new Date().toISOString();
 
     db.updateJob(this.jobId, { status: 'running', startedAt: this.health.startedAt });
-    this.log('info', '🚀 Starting scheduler for ' + this.config.email);
+    this.log('info', '🚀 Starting scheduler for ' + this.config.email + ' (Puppeteer mode)');
 
-    this.resetSession();
-
-    // Login
+    // Login (launches browser + navigates to login page)
     try {
       await this.login();
     } catch (err) {
       this.log('error', 'Initial login failed: ' + err.message);
       db.updateJob(this.jobId, { status: 'error', lastError: err.message });
       this.running = false;
+      await this.closePage();
       return;
     }
 
@@ -764,10 +772,10 @@ class SchedulerInstance {
   async _runLoop() {
     // Cooldown tiers when IP_BLOCKED is detected (escalates on repeated blocks)
     const BLOCK_COOLDOWNS = [
-       5 * 60 * 1000,  //  5 min  — 1st block
-      15 * 60 * 1000,  // 15 min  — 2nd
-      30 * 60 * 1000,  // 30 min  — 3rd
-      60 * 60 * 1000,  // 60 min  — 4th+
+       5 * 60 * 1000,
+      15 * 60 * 1000,
+      30 * 60 * 1000,
+      60 * 60 * 1000,
     ];
     let blockCount = 0;
 
@@ -793,7 +801,6 @@ class SchedulerInstance {
           db.updateJob(this.jobId, { lastError: 'IP blocked — cooldown ' + Math.round(cooldownMs / 60000) + 'min (#' + blockCount + ')' });
           await this.sleep(cooldownMs);
 
-          // Fresh session after cooldown — new cookies often clear the block
           this.log('info', 'Cooldown done. Re-establishing session...');
           try {
             await this.login();
@@ -840,7 +847,7 @@ class SchedulerInstance {
 
       if (!this.running) break;
 
-      // Wait for next cycle with ±10% jitter so requests never land on a fixed schedule
+      // Wait for next cycle with ±10% jitter
       const interval = (this.config.checkIntervalSeconds || 30) * 1000;
       const jitter = interval * 0.1 * (Math.random() - 0.5);
       const waitMs = Math.max(3000, interval + jitter);
@@ -848,6 +855,7 @@ class SchedulerInstance {
     }
 
     this.syncHealth();
+    await this.closePage();
   }
 
   // ============================================================
@@ -860,7 +868,6 @@ class SchedulerInstance {
     this.stopping = true;
     this.cancelSleep();
 
-    // Wait for loop to finish current cycle
     if (this.loopPromise) {
       try {
         await Promise.race([this.loopPromise, new Promise(r => setTimeout(r, 5000))]);
@@ -868,6 +875,7 @@ class SchedulerInstance {
     }
 
     this.syncHealth();
+    await this.closePage();
     db.updateJob(this.jobId, { status: 'stopped' });
     this.log('info', '⏹️ Scheduler stopped.');
   }

@@ -107,10 +107,13 @@ Module._load = function (request, parent, isMain) {
 const { SchedulerInstance, loadModules } = require('../scheduler-engine');
 
 // ── Custom SchedulerInstance that uses a pre-loaded config ──
+let agentInstance = null; // keep reference for graceful shutdown
+
 async function runAgent() {
   await loadModules();
 
   const instance = new SchedulerInstance(JOB_ID);
+  agentInstance = instance; // store for SIGTERM handler
 
   // Inject config directly (no DB read needed)
   const originalStart = instance.start.bind(instance);
@@ -139,8 +142,6 @@ async function runAgent() {
 
     await sendStatus('running', { startedAt: this.health.startedAt });
     this.log('info', '🚀 Agent started for job ' + JOB_ID);
-
-    this.resetSession();
 
     try {
       await this.login();
@@ -180,7 +181,10 @@ async function runAgent() {
 
 // ── Graceful shutdown on SIGTERM (PM2 stop) ──
 process.on('SIGTERM', async () => {
-  console.log('[Agent] Received SIGTERM, sending stopped status...');
+  console.log('[Agent] Received SIGTERM, stopping scheduler and closing browser...');
+  if (agentInstance) {
+    try { await agentInstance.stop(); } catch (e) { /* ignore */ }
+  }
   await sendStatus('stopped', {}).catch(() => {});
   process.exit(0);
 });
