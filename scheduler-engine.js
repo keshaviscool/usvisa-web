@@ -5,9 +5,12 @@
 // ============================================================
 
 const db = require('./database');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 const BASE_URL = 'https://ais.usvisa-info.com';
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
 // Shared browser instance (lazy-launched, reused across jobs)
 let sharedBrowser = null;
@@ -19,16 +22,13 @@ async function launchBrowser() {
 
   browserLaunchPromise = (async () => {
     const b = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
         '--disable-sync',
@@ -36,7 +36,8 @@ async function launchBrowser() {
         '--metrics-recording-only',
         '--mute-audio',
         '--no-default-browser-check',
-        '--window-size=1920,1080'
+        '--window-size=1920,1080',
+        '--disable-blink-features=AutomationControlled'
       ],
       defaultViewport: { width: 1920, height: 1080 }
     });
@@ -128,11 +129,27 @@ class SchedulerInstance {
     }
     this.page = await browser.newPage();
 
-    // Block images, stylesheets, fonts to save bandwidth & speed
+    // Set a real User-Agent
+    await this.page.setUserAgent(USER_AGENT);
+
+    // Set realistic extra HTTP headers
+    await this.page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="133", "Google Chrome";v="133"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"macOS"'
+    });
+
+    // Hide webdriver flag
+    await this.page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
+
+    // Block images, fonts, media to save bandwidth (keep stylesheets & scripts)
     await this.page.setRequestInterception(true);
     this.page.on('request', (req) => {
       const type = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+      if (['image', 'font', 'media'].includes(type)) {
         req.abort();
       } else {
         req.continue();
@@ -256,16 +273,27 @@ class SchedulerInstance {
 
     // Step 1: Navigate to login page
     try {
-      await this.page.goto(loginUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+      await this.page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Give the page a moment to settle (scripts may inject elements)
+      await this.sleep(2000);
     } catch (err) {
       throw new Error('Could not load login page: ' + err.message);
     }
-    this.log('info', 'Login page loaded.');
+    this.log('info', 'Login page loaded: ' + this.page.url());
 
-    // Step 2: Extract CSRF
-    const csrf = await this.extractCsrf();
+    // Step 2: Extract CSRF — try immediately, then wait for the element
+    let csrf = await this.extractCsrf();
+    if (!csrf) {
+      // The meta tag might not be in the DOM yet — wait up to 10s
+      try {
+        await this.page.waitForSelector('meta[name="csrf-token"], input[name="authenticity_token"]', { timeout: 10000 });
+        csrf = await this.extractCsrf();
+      } catch (e) { /* timeout — will handle below */ }
+    }
     if (!csrf) {
       const html = await this.page.content();
+      const snippet = html.substring(0, 500);
+      this.log('error', 'CSRF not found. URL: ' + this.page.url() + ' | HTML snippet: ' + snippet);
       if (html.includes('try again later') || html.includes('Too many')) {
         throw new Error('Login rate limited. Try again later.');
       }
@@ -274,6 +302,8 @@ class SchedulerInstance {
     this.log('info', 'Got CSRF token.');
 
     // Step 3: Fill and submit login form
+    // NOTE: The form uses data-remote="true" (Rails UJS), so it submits via AJAX.
+    // The server responds with JS that sets window.location for redirect.
     try {
       // Clear fields first in case of previous values
       await this.page.evaluate(() => {
@@ -293,20 +323,28 @@ class SchedulerInstance {
         if (!isChecked) await policyCheckbox.click();
       }
 
-      // Click submit
-      await Promise.all([
-        this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
-        this.page.click('input[type="submit"], button[type="submit"]')
-      ]);
+      // Click submit and wait for either navigation or AJAX response
+      this.log('info', 'Submitting login form...');
+      await this.page.click('input[type="submit"], button[type="submit"]');
+
+      // Wait for navigation (the AJAX response triggers window.location = ...)
+      // Use a race between navigation and a timeout
+      try {
+        await this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch (navErr) {
+        // Navigation may not happen if AJAX login failed (wrong creds, rate limit, etc.)
+        this.log('debug', 'No navigation after submit: ' + navErr.message);
+      }
+
+      // Give extra time for JS redirects to fire
+      await this.sleep(3000);
     } catch (err) {
       throw new Error('Login form submission failed: ' + err.message);
     }
 
-    // Wait a moment for any JS redirects
-    await this.sleep(2000);
-
     // Step 4: Check if login succeeded
     const currentUrl = this.page.url();
+    this.log('info', 'Post-login URL: ' + currentUrl);
     const pageContent = await this.page.content();
 
     if (pageContent.includes('Invalid Email or password') || pageContent.includes('invalid email or password')) {
@@ -321,7 +359,7 @@ class SchedulerInstance {
       this.log('info', 'Still on login page, attempting redirect...');
       try {
         const groupUrl = BASE_URL + '/' + this.config.country + '/niv/groups/' + this.config.scheduleId;
-        await this.page.goto(groupUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await this.page.goto(groupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         const afterUrl = this.page.url();
         if (afterUrl.includes('sign_in')) {
           throw new Error('Login failed — redirected back to sign in');
@@ -348,7 +386,8 @@ class SchedulerInstance {
     const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
 
     try {
-      await this.page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.sleep(2000);
     } catch (err) {
       throw new Error('Could not load appointment page: ' + err.message);
     }
@@ -455,7 +494,8 @@ class SchedulerInstance {
     if (!this.csrfToken || attemptNum > 1) {
       const pageUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
       try {
-        await this.page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await this.sleep(1000);
         await this.extractCsrf();
       } catch (e) {
         this.log('warn', 'Could not refresh CSRF: ' + e.message);
