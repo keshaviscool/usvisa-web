@@ -331,7 +331,7 @@ class JobManager {
     }
 
     // Cache in DB
-    db.setCachedLocations(id, locations);
+    db.cacheLocations(id, locations);
 
     return locations;
   }
