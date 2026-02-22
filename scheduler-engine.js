@@ -10,7 +10,96 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
 const BASE_URL = 'https://ais.usvisa-info.com';
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+
+// ── Fingerprint pool ──
+// Each entry is a realistic, internally-consistent browser identity.
+// UA, sec-ch-ua, platform, and viewport all match so nothing looks off.
+const os = require('os');
+const IS_LINUX = os.platform() === 'linux';
+
+const FINGERPRINTS = [
+  // ── Windows / Chrome 133 ──
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="133", "Google Chrome";v="133", "Not?A_Brand";v="99"',
+    platform: '"Windows"',
+    viewport: { width: 1920, height: 1080 },
+    acceptLang: 'en-US,en;q=0.9'
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="133", "Google Chrome";v="133", "Not?A_Brand";v="99"',
+    platform: '"Windows"',
+    viewport: { width: 1536, height: 864 },
+    acceptLang: 'en-US,en;q=0.9'
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="132", "Google Chrome";v="132", "Not?A_Brand";v="99"',
+    platform: '"Windows"',
+    viewport: { width: 1366, height: 768 },
+    acceptLang: 'en-US,en;q=0.9'
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="131", "Google Chrome";v="131", "Not?A_Brand";v="99"',
+    platform: '"Windows"',
+    viewport: { width: 1440, height: 900 },
+    acceptLang: 'en-US,en;q=0.9,es;q=0.8'
+  },
+  // ── macOS / Chrome 133 (only used when actually on macOS) ──
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="133", "Google Chrome";v="133", "Not?A_Brand";v="99"',
+    platform: '"macOS"',
+    viewport: { width: 1440, height: 900 },
+    acceptLang: 'en-US,en;q=0.9',
+    macOnly: true
+  },
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="132", "Google Chrome";v="132", "Not?A_Brand";v="99"',
+    platform: '"macOS"',
+    viewport: { width: 1680, height: 1050 },
+    acceptLang: 'en-CA,en;q=0.9,fr;q=0.8',
+    macOnly: true
+  },
+  // ── Linux / Chrome (used when running on Linux VPS) ──
+  {
+    ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="133", "Google Chrome";v="133", "Not?A_Brand";v="99"',
+    platform: '"Linux"',
+    viewport: { width: 1920, height: 1080 },
+    acceptLang: 'en-US,en;q=0.9',
+    linuxOnly: true
+  },
+  {
+    ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="132", "Google Chrome";v="132", "Not?A_Brand";v="99"',
+    platform: '"Linux"',
+    viewport: { width: 1366, height: 768 },
+    acceptLang: 'en-US,en;q=0.9',
+    linuxOnly: true
+  },
+  {
+    ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    secChUa: '"Chromium";v="131", "Google Chrome";v="131", "Not?A_Brand";v="99"',
+    platform: '"Linux"',
+    viewport: { width: 1536, height: 864 },
+    acceptLang: 'en-CA,en;q=0.9',
+    linuxOnly: true
+  }
+];
+
+function pickFingerprint() {
+  // Filter to platform-appropriate fingerprints
+  const candidates = FINGERPRINTS.filter(fp => {
+    if (IS_LINUX && fp.macOnly) return false;   // don't claim macOS on Linux
+    if (!IS_LINUX && fp.linuxOnly) return false; // don't claim Linux on macOS
+    return true;
+  });
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
 
 // Shared browser instance (lazy-launched, reused across jobs)
 let sharedBrowser = null;
@@ -36,10 +125,9 @@ async function launchBrowser() {
         '--metrics-recording-only',
         '--mute-audio',
         '--no-default-browser-check',
-        '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled'
       ],
-      defaultViewport: { width: 1920, height: 1080 }
+      defaultViewport: null  // each page sets its own viewport via fingerprint
     });
     b.on('disconnected', () => { sharedBrowser = null; });
     sharedBrowser = b;
@@ -64,6 +152,9 @@ class SchedulerInstance {
     this.csrfToken = null;
     this.config = null;
     this.loopPromise = null;
+
+    // Pick a unique fingerprint for this instance (stays constant for its lifetime)
+    this.fingerprint = pickFingerprint();
 
     // Health stats (in-memory, synced to DB periodically)
     this.health = {
@@ -129,21 +220,30 @@ class SchedulerInstance {
     }
     this.page = await browser.newPage();
 
-    // Set a real User-Agent
-    await this.page.setUserAgent(USER_AGENT);
+    const fp = this.fingerprint;
+    this.log('info', '🪪 Fingerprint: ' + fp.platform + ' / Chrome ' + fp.secChUa.match(/Chrome";v="(\d+)/)?.[1] + ' / ' + fp.viewport.width + 'x' + fp.viewport.height);
 
-    // Set realistic extra HTTP headers
+    // Set the viewport to match the fingerprint
+    await this.page.setViewport(fp.viewport);
+
+    // Set User-Agent to match the fingerprint
+    await this.page.setUserAgent(fp.ua);
+
+    // Set matching HTTP headers
     await this.page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="133", "Google Chrome";v="133"',
+      'Accept-Language': fp.acceptLang,
+      'sec-ch-ua': fp.secChUa,
       'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"macOS"'
+      'sec-ch-ua-platform': fp.platform
     });
 
-    // Hide webdriver flag
-    await this.page.evaluateOnNewDocument(() => {
+    // Hide webdriver flag and override navigator.platform to match fingerprint
+    const navPlatform = fp.platform.includes('Windows') ? 'Win32' :
+                        fp.platform.includes('macOS') ? 'MacIntel' : 'Linux x86_64';
+    await this.page.evaluateOnNewDocument((plat) => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
+      Object.defineProperty(navigator, 'platform', { get: () => plat });
+    }, navPlatform);
 
     // Block images, fonts, media to save bandwidth (keep stylesheets & scripts)
     await this.page.setRequestInterception(true);
@@ -428,107 +528,407 @@ class SchedulerInstance {
   }
 
   // ============================================================
-  // CHECK DATES — in-browser fetch (real Chrome TLS + cookies)
+  // NAVIGATE TO APPOINTMENT PAGE (shared helper)
+  // Ensures we're on the appointment page with a fresh CSRF.
+  // Reuses the page if already there, avoiding extra navigations.
   // ============================================================
-  async checkDates(facilityId) {
-    const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/days/' + facilityId + '.json?appointments[expedite]=false';
+  async ensureOnAppointmentPage() {
+    const apptUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
 
-    const resp = await this.browserFetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-CSRF-Token': this.csrfToken || ''
+    // Check if we're already on the appointment page
+    const currentUrl = this.page.url();
+    const isOnApptPage = currentUrl.includes('/appointment') && !currentUrl.includes('/days/') && !currentUrl.includes('/times/');
+
+    if (isOnApptPage) {
+      // Quick DOM check: is the facility dropdown still present?
+      const hasFacilitySelect = await this.page.evaluate(() => !!document.querySelector('#appointments_consulate_appointment_facility_id'));
+      if (hasFacilitySelect) {
+        this.log('debug', 'Already on appointment page, reusing.');
+        return;
       }
-    });
+    }
 
-    if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
-    if (resp.status === 429) throw new Error('RATE_LIMITED');
-    if (resp.status === 422) throw new Error('CSRF_EXPIRED');
-    if (!resp.ok) throw new Error('HTTP_' + resp.status);
-
+    this.log('debug', 'Navigating to appointment page...');
     try {
-      const data = JSON.parse(resp.text);
-      if (!Array.isArray(data)) {
-        if (resp.text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
-        return [];
-      }
-      return data;
+      await this.page.goto(apptUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.sleep(1500 + Math.random() * 1000);
+    } catch (err) {
+      throw new Error('Could not load appointment page: ' + err.message);
+    }
+
+    const afterUrl = this.page.url();
+    if (afterUrl.includes('sign_in')) {
+      throw new Error('SESSION_EXPIRED');
+    }
+
+    await this.extractCsrf();
+
+    // Wait for the facility dropdown to be present
+    try {
+      await this.page.waitForSelector('#appointments_consulate_appointment_facility_id', { timeout: 10000 });
     } catch (e) {
-      if (resp.text.includes('sign_in')) throw new Error('SESSION_EXPIRED');
-      throw new Error('PARSE_ERROR: ' + e.message);
+      throw new Error('Appointment page did not load properly (no facility dropdown)');
     }
   }
 
   // ============================================================
-  // CHECK TIMES — in-browser fetch
+  // CHECK DATES — DOM-based (simulates user selecting a facility)
+  // Instead of hitting the JSON endpoint directly, we:
+  // 1. Navigate to the appointment page
+  // 2. Select the facility from the dropdown (triggers AJAX naturally)
+  // 3. Wait for the calendar to load
+  // 4. Extract available dates from the rendered datepicker
   // ============================================================
-  async checkTimes(facilityId, date) {
-    const url = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment/times/' + facilityId + '.json?date=' + date + '&appointments[expedite]=false';
+  async checkDates(facilityId) {
+    await this.ensureOnAppointmentPage();
 
-    const resp = await this.browserFetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-CSRF-Token': this.csrfToken || ''
-      }
+    // Set up a promise to intercept the AJAX response for days.json
+    // This fires naturally when the dropdown selection changes
+    const daysJsonPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.page.off('response', handler);
+        resolve(null); // timeout — no response, we'll extract from DOM
+      }, 15000);
+
+      const handler = async (response) => {
+        const url = response.url();
+        if (url.includes('/appointment/days/') && url.includes('.json')) {
+          clearTimeout(timeout);
+          this.page.off('response', handler);
+          try {
+            const status = response.status();
+            if (status === 401 || status === 403) {
+              resolve({ _error: 'SESSION_EXPIRED' });
+              return;
+            }
+            if (status === 429) {
+              resolve({ _error: 'RATE_LIMITED' });
+              return;
+            }
+            if (status === 422) {
+              resolve({ _error: 'CSRF_EXPIRED' });
+              return;
+            }
+            const json = await response.json();
+            resolve(json);
+          } catch (e) {
+            resolve(null);
+          }
+        }
+      };
+      this.page.on('response', handler);
     });
 
-    if (resp.status === 401 || resp.status === 403) throw new Error('SESSION_EXPIRED');
-    if (!resp.ok) throw new Error('HTTP_' + resp.status);
+    // Select the facility from the dropdown (like a real user)
+    this.log('debug', 'Selecting facility ' + facilityId + ' from dropdown...');
+    const selectResult = await this.page.evaluate((facId) => {
+      const sel = document.querySelector('#appointments_consulate_appointment_facility_id');
+      if (!sel) return { error: 'no_select' };
+      // Check if the option exists
+      const optExists = Array.from(sel.options).some(o => o.value === String(facId));
+      if (!optExists) return { error: 'option_not_found' };
+      sel.value = String(facId);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    }, facilityId);
 
-    const data = JSON.parse(resp.text);
-    const times = (data && data.available_times) ? data.available_times : (Array.isArray(data) ? data : []);
-    return times;
+    if (selectResult.error === 'no_select') throw new Error('Facility dropdown not found on page');
+    if (selectResult.error === 'option_not_found') throw new Error('Facility ' + facilityId + ' not in dropdown');
+
+    // Wait a human-like beat
+    await this.sleep(50 + Math.random() * 10);
+
+    // Wait for the AJAX response that the dropdown selection triggered
+    const daysJson = await daysJsonPromise;
+
+    if (daysJson !== null) {
+      // Check for error signals from the intercepted response
+      if (daysJson._error) {
+        throw new Error(daysJson._error);
+      }
+
+      // We intercepted the AJAX response — use it directly
+      if (Array.isArray(daysJson)) {
+        this.log('debug', 'Got ' + daysJson.length + ' dates from intercepted AJAX response.');
+        return daysJson;
+      }
+      // If the response was a redirect to sign_in (returned as HTML)
+      if (typeof daysJson === 'string' && daysJson.includes && daysJson.includes('sign_in')) {
+        throw new Error('SESSION_EXPIRED');
+      }
+      return [];
+    }
+
+    // Fallback: try to extract dates from the rendered datepicker
+    this.log('debug', 'No AJAX intercept, extracting from DOM...');
+    await this.sleep(500); // give calendar time to render
+
+    const domDates = await this.page.evaluate(() => {
+      // The datepicker uses jQuery UI — available dates have class "ui-datepicker-current-day" or
+      // are <td> elements with data-handler="selectDay" that aren't disabled
+      const results = [];
+      const cells = document.querySelectorAll('.ui-datepicker td[data-handler="selectDay"]');
+      cells.forEach(cell => {
+        const a = cell.querySelector('a');
+        if (!a) return;
+        const day = a.textContent.trim();
+        // Get month and year from the datepicker header
+        const picker = cell.closest('.ui-datepicker');
+        const monthEl = picker && picker.querySelector('.ui-datepicker-month');
+        const yearEl = picker && picker.querySelector('.ui-datepicker-year');
+        if (monthEl && yearEl) {
+          const month = monthEl.textContent.trim();
+          const year = yearEl.textContent.trim();
+          const dateStr = new Date(month + ' ' + day + ', ' + year).toISOString().split('T')[0];
+          if (dateStr && dateStr !== 'Invalid Date') {
+            results.push({ date: dateStr, business_day: true });
+          }
+        }
+      });
+      return results;
+    });
+
+    if (domDates.length > 0) {
+      this.log('debug', 'Extracted ' + domDates.length + ' dates from datepicker DOM.');
+      return domDates;
+    }
+
+    // Check if session expired
+    const pageContent = await this.page.content();
+    if (pageContent.includes('sign_in') || pageContent.includes('Sign In')) {
+      throw new Error('SESSION_EXPIRED');
+    }
+
+    // The calendar might show "No appointments available" or similar
+    this.log('debug', 'No dates found in DOM for facility ' + facilityId);
+    return [];
   }
 
   // ============================================================
-  // BOOK APPOINTMENT — in-browser POST
+  // CHECK TIMES — DOM-based (simulates user clicking a date)
+  // After checkDates, the calendar is already loaded.
+  // We click the target date in the datepicker, then wait for
+  // the time dropdown to populate via AJAX.
+  // ============================================================
+  async checkTimes(facilityId, date) {
+    // Ensure we're on the appointment page with the right facility selected
+    await this.ensureOnAppointmentPage();
+
+    // Make sure the correct facility is selected
+    await this.page.evaluate((facId) => {
+      const sel = document.querySelector('#appointments_consulate_appointment_facility_id');
+      if (sel && sel.value !== String(facId)) {
+        sel.value = String(facId);
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, facilityId);
+
+    // Set up intercept for the times.json AJAX
+    const timesJsonPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.page.off('response', handler);
+        resolve(null);
+      }, 15000);
+
+      const handler = async (response) => {
+        const url = response.url();
+        if (url.includes('/appointment/times/') && url.includes('.json')) {
+          clearTimeout(timeout);
+          this.page.off('response', handler);
+          try {
+            const json = await response.json();
+            resolve(json);
+          } catch (e) {
+            resolve(null);
+          }
+        }
+      };
+      this.page.on('response', handler);
+    });
+
+    // Set the date in the date input field (simulates datepicker selection)
+    // The date input is readonly and set by jQuery UI datepicker
+    this.log('debug', 'Setting date ' + date + ' in appointment form...');
+    await this.page.evaluate((dateStr) => {
+      const dateInput = document.querySelector('#appointments_consulate_appointment_date');
+      if (!dateInput) return;
+      // Use jQuery datepicker API if available
+      if (window.jQuery && jQuery(dateInput).datepicker) {
+        jQuery(dateInput).datepicker('setDate', dateStr);
+      } else {
+        // Fallback: set the value directly and fire change
+        dateInput.value = dateStr;
+        dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, date);
+
+    await this.sleep(300 + Math.random() * 300);
+
+    // Wait for the times AJAX
+    const timesJson = await timesJsonPromise;
+
+    if (timesJson !== null) {
+      const times = (timesJson && timesJson.available_times) ? timesJson.available_times : (Array.isArray(timesJson) ? timesJson : []);
+      this.log('debug', 'Got ' + times.length + ' time slots from intercepted AJAX.');
+      return times;
+    }
+
+    // Fallback: extract times from the select dropdown
+    this.log('debug', 'No AJAX intercept for times, extracting from DOM...');
+    await this.sleep(3000);
+
+    const domTimes = await this.page.evaluate(() => {
+      const sel = document.querySelector('#appointments_consulate_appointment_time');
+      if (!sel) return [];
+      const times = [];
+      sel.querySelectorAll('option').forEach(opt => {
+        const val = opt.value ? opt.value.trim() : '';
+        if (val) times.push(val);
+      });
+      return times;
+    });
+
+    return domTimes;
+  }
+
+  // ============================================================
+  // BOOK APPOINTMENT — form-based (simulates user submitting)
+  // Instead of a raw POST, we fill out the form on the
+  // appointment page and submit it like a real user would.
   // ============================================================
   async bookAppointment(facilityId, date, time, attemptNum) {
     attemptNum = attemptNum || 1;
     this.log('info', '📝 Booking attempt #' + attemptNum + ': facility=' + facilityId + ' date=' + date + ' time=' + time);
 
-    // Refresh CSRF if needed — visit the appointment page
-    if (!this.csrfToken || attemptNum > 1) {
-      const pageUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
-      try {
-        await this.page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await this.sleep(1000);
-        await this.extractCsrf();
-      } catch (e) {
-        this.log('warn', 'Could not refresh CSRF: ' + e.message);
-      }
+    // Navigate to the appointment page fresh for each booking attempt
+    const apptUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
+    try {
+      await this.page.goto(apptUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.sleep(1500 + Math.random() * 1000);
+      await this.extractCsrf();
+    } catch (err) {
+      throw new Error('Could not load appointment page for booking: ' + err.message);
     }
 
-    const bookUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('sign_in')) {
+      return { success: false, verified: false, reason: 'Session expired during booking', date, time, facilityId };
+    }
 
-    const formBody = new URLSearchParams();
-    formBody.append('utf8', '\u2713');
-    formBody.append('authenticity_token', this.csrfToken || '');
-    formBody.append('appointments[consulate_appointment][facility_id]', facilityId);
-    formBody.append('appointments[consulate_appointment][date]', date);
-    formBody.append('appointments[consulate_appointment][time]', time);
-    formBody.append('confirmed', 'Confirm');
+    // Wait for the form to be ready
+    try {
+      await this.page.waitForSelector('#appointments_consulate_appointment_facility_id', { timeout: 10000 });
+    } catch (e) {
+      return { success: false, verified: false, reason: 'Appointment form not loaded', date, time, facilityId };
+    }
 
-    const resp = await this.browserFetch(bookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-CSRF-Token': this.csrfToken || ''
-      },
-      body: formBody.toString()
-    }, 1);
+    // Step 1: Select the facility
+    this.log('debug', 'Booking: selecting facility ' + facilityId);
+    await this.page.select('#appointments_consulate_appointment_facility_id', String(facilityId));
+    await this.sleep(1000 + Math.random() * 500);
 
-    const html = resp.text;
+    // Step 2: Wait for the date/time section to appear
+    try {
+      await this.page.waitForSelector('#consulate_date_time', { visible: true, timeout: 15000 });
+    } catch (e) {
+      this.log('debug', 'Date/time section did not appear, trying to continue...');
+    }
+
+    // Step 3: Set the date using jQuery datepicker
+    this.log('debug', 'Booking: setting date ' + date);
+    await this.page.evaluate((dateStr) => {
+      const dateInput = document.querySelector('#appointments_consulate_appointment_date');
+      if (!dateInput) return;
+      if (window.jQuery && jQuery(dateInput).datepicker) {
+        jQuery(dateInput).datepicker('setDate', dateStr);
+      } else {
+        dateInput.value = dateStr;
+        dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, date);
+    await this.sleep(1500 + Math.random() * 500);
+
+    // Step 4: Wait for time slots to load, then select the time
+    this.log('debug', 'Booking: selecting time ' + time);
+    // Wait for the time <select> to have options
+    try {
+      await this.page.waitForFunction(
+        () => {
+          const sel = document.querySelector('#appointments_consulate_appointment_time');
+          return sel && sel.options.length > 1;
+        },
+        { timeout: 10000 }
+      );
+    } catch (e) {
+      this.log('debug', 'Time options did not populate, attempting to set directly...');
+    }
+
+    // Try native page.select, fall back to evaluate
+    try {
+      await this.page.select('#appointments_consulate_appointment_time', time);
+    } catch (e) {
+      await this.page.evaluate((t) => {
+        const sel = document.querySelector('#appointments_consulate_appointment_time');
+        if (sel) {
+          // Add the option if it doesn't exist
+          let found = false;
+          for (let i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === t) { found = true; break; }
+          }
+          if (!found) {
+            const opt = document.createElement('option');
+            opt.value = t;
+            opt.text = t;
+            sel.add(opt);
+          }
+          sel.value = t;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, time);
+    }
+    await this.sleep(500 + Math.random() * 300);
+
+    // Step 5: Enable and click the submit button
+    this.log('info', 'Booking: submitting form...');
+    await this.page.evaluate(() => {
+      const submitBtn = document.querySelector('#appointments_submit');
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('disabled');
+      }
+    });
+    await this.sleep(200);
+
+    // Listen for navigation after submit
+    const navPromise = this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
+
+    try {
+      await this.page.click('#appointments_submit');
+    } catch (e) {
+      // Fallback: submit the form directly
+      await this.page.evaluate(() => {
+        const form = document.querySelector('#appointment-form');
+        if (form) form.submit();
+      });
+    }
+
+    await navPromise;
+    await this.sleep(2000);
+
+    // Step 6: Check the result
+    const html = await this.page.content();
     const lowerHtml = html.toLowerCase();
+    const resultUrl = this.page.url();
 
     let confirmed = false;
     let failReason = null;
 
     if (lowerHtml.includes('successfully scheduled') || lowerHtml.includes('successfully booked') || lowerHtml.includes('your appointment has been scheduled')) {
+      confirmed = true;
+    }
+
+    // Check if we're on the confirmation/instructions page (step 5)
+    if (!confirmed && (resultUrl.includes('/instructions') || lowerHtml.includes('instructions') && lowerHtml.includes('your appointment'))) {
       confirmed = true;
     }
 
@@ -539,12 +939,8 @@ class SchedulerInstance {
         failReason = 'Server problem processing booking';
       } else if (lowerHtml.includes('sign_in')) {
         failReason = 'Session expired during booking';
-      } else if (resp.status === 422) {
-        failReason = 'CSRF token expired';
-      } else if (resp.status === 401 || resp.status === 403) {
-        failReason = 'Session expired (' + resp.status + ')';
-      } else if (!resp.ok) {
-        failReason = 'HTTP error ' + resp.status;
+      } else if (lowerHtml.includes('appointments[consulate_appointment][facility_id]') && resultUrl.includes('/appointment')) {
+        failReason = 'Still on appointment form (booking not processed)';
       }
     }
 
@@ -612,6 +1008,13 @@ class SchedulerInstance {
 
       const facId = facilityIds[i];
       const facName = locationMap[facId] || ('Facility ' + facId);
+
+      // Human-like pause between facility checks (not needed for the first one)
+      if (i > 0) {
+        const pauseMs = 100 + Math.random() * 30;
+        this.log('debug', 'Pausing ' + Math.round(pauseMs / 1000) + 's before next facility...');
+        await this.sleep(pauseMs);
+      }
 
       try {
         const dates = await this.checkDates(facId);
