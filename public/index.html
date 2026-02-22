@@ -529,6 +529,65 @@
       min-height: 18px;
     }
 
+    /* ── All-Logs Modal ── */
+    .modal-fullscreen {
+      width: min(960px, 96vw);
+      max-height: 92vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-fullscreen .modal-body {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 14px 20px 0;
+    }
+    .log-viewer-full {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      flex: 1;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .alllog-toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .alllog-toolbar input[type="text"] {
+      flex: 1;
+      min-width: 180px;
+      padding: 6px 10px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    .alllog-toolbar input[type="text"]:focus { border-color: var(--accent); }
+    .alllog-toolbar select {
+      padding: 6px 10px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    .alllog-count {
+      font-size: 12px;
+      color: var(--text2);
+      white-space: nowrap;
+    }
+
   </style>
 </head>
 <body>
@@ -654,6 +713,43 @@
 
   <div class="toast-container" id="toasts"></div>
 
+  <!-- All Logs Modal -->
+  <div class="modal-overlay" id="allLogsModal">
+    <div class="modal modal-fullscreen">
+      <div class="modal-header">
+        <div>
+          <h2 id="allLogsTitle">All Logs</h2>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px" id="allLogsSubtitle"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-ghost btn-sm" onclick="downloadLogs()">⬇ Download</button>
+          <button class="modal-close" onclick="closeAllLogsModal()">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="alllog-toolbar">
+          <input type="text" id="allLogSearch" placeholder="🔍 Filter logs…" oninput="filterAllLogs()">
+          <select id="allLogLevel" onchange="filterAllLogs()">
+            <option value="">All levels</option>
+            <option value="info">Info</option>
+            <option value="success">Success</option>
+            <option value="warn">Warn</option>
+            <option value="error">Error</option>
+            <option value="debug">Debug</option>
+          </select>
+          <span class="alllog-count" id="allLogCount"></span>
+        </div>
+        <div class="log-viewer-full" id="allLogViewer">
+          <div class="loading-overlay"><div class="spinner"></div> Loading all logs…</div>
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content:space-between">
+        <span style="font-size:12px;color:var(--text2)">Showing up to 10,000 most recent entries</span>
+        <button class="btn btn-ghost" onclick="closeAllLogsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     // ============================================================
     // STATE
@@ -749,43 +845,137 @@
     // ============================================================
     // RENDER
     // ============================================================
+    // Track what's already rendered so we can do silent in-place updates
+    let renderedView = null;   // 'list' | 'detail'
+    let renderedJobIds = [];   // ordered list of job ids currently in the DOM
+
     function render() {
       if (currentView === 'list') renderJobList();
       else renderJobDetail();
     }
 
+    // ── helpers for in-place patching ──
+    function setIfDiff(el, html) {
+      if (el && el.innerHTML !== html) el.innerHTML = html;
+    }
+    function setTextIfDiff(el, text) {
+      if (el && el.textContent !== text) el.textContent = text;
+    }
+
     function renderJobList() {
       const app = document.getElementById('app');
+
       if (jobs.length === 0) {
-        app.innerHTML = `
-          <div class="empty-state">
-            <div class="empty-state-icon">📋</div>
-            <h3>No Jobs Yet</h3>
-            <p>Create your first scheduler job to get started.</p>
-            <br>
-            <button class="btn btn-primary" onclick="showCreateModal()">+ Create Job</button>
-          </div>`;
+        // Only repaint if there is actually something there now
+        if (renderedView !== 'list-empty') {
+          app.innerHTML = `
+            <div class="empty-state">
+              <div class="empty-state-icon">📋</div>
+              <h3>No Jobs Yet</h3>
+              <p>Create your first scheduler job to get started.</p>
+              <br>
+              <button class="btn btn-primary" onclick="showCreateModal()">+ Create Job</button>
+            </div>`;
+          renderedView = 'list-empty';
+          renderedJobIds = [];
+        }
         return;
       }
 
-      let html = '<div class="job-grid">';
+      const newIds = jobs.map(j => j.id);
+
+      // Full repaint only when the set/order of jobs changes
+      const needsFullRepaint =
+        renderedView !== 'list' ||
+        JSON.stringify(renderedJobIds) !== JSON.stringify(newIds);
+
+      if (needsFullRepaint) {
+        let html = '<div class="job-grid" id="jobGrid">';
+        for (const job of jobs) {
+          html += buildJobCardHTML(job);
+        }
+        html += '</div>';
+        app.innerHTML = html;
+        renderedView = 'list';
+        renderedJobIds = newIds;
+        return;
+      }
+
+      // Silent in-place patch — only touch what changed
       for (const job of jobs) {
-        const badge = statusBadge(job.status);
-        const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
-        const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+        patchJobCard(job);
+      }
+    }
 
-        html += `
-          <div class="job-card" onclick="viewJob('${job.id}')">
-            <div class="job-card-top">
-              <div>
-                <div class="job-name">${esc(job.name)}</div>
-                <div class="job-email">${esc(job.email)} · Schedule ${esc(job.scheduleId)}</div>
-              </div>
-              ${badge}
-            </div>`;
+    function buildJobCardHTML(job) {
+      const badge = statusBadge(job.status);
+      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+      const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
 
+      let bookingBanner = '';
+      if (job.status === 'booked' && job.bookedDate) {
+        bookingBanner = `
+          <div class="booking-banner">
+            <div class="booking-banner-icon">🎉</div>
+            <div>
+              <h3>Booked: ${esc(job.bookedDate)} at ${esc(job.bookedTime || '—')}</h3>
+              <p>${esc(job.bookedFacility || '')}</p>
+            </div>
+          </div>`;
+      }
+
+      return `
+        <div class="job-card" id="jcard-${job.id}" onclick="viewJob('${job.id}')">
+          <div class="job-card-top">
+            <div>
+              <div class="job-name">${esc(job.name)}</div>
+              <div class="job-email">${esc(job.email)} · Schedule ${esc(job.scheduleId)}</div>
+            </div>
+            <span id="jcard-badge-${job.id}">${badge}</span>
+          </div>
+          <div id="jcard-banner-${job.id}">${bookingBanner}</div>
+          <div class="job-stats">
+            <div class="job-stat">
+              <div class="job-stat-label">Date Range</div>
+              <div class="job-stat-value">${esc(job.startDate)} → ${esc(job.endDate)}</div>
+            </div>
+            <div class="job-stat">
+              <div class="job-stat-label">Checks</div>
+              <div class="job-stat-value" id="jcard-checks-${job.id}">${job.successfulChecks}/${job.totalChecks} <span style="color:var(--text2);font-weight:400">(${rate}%)</span></div>
+            </div>
+            <div class="job-stat">
+              <div class="job-stat-label">Uptime</div>
+              <div class="job-stat-value" id="jcard-uptime-${job.id}">${uptime}</div>
+            </div>
+            <div class="job-stat">
+              <div class="job-stat-label">Locations</div>
+              <div class="job-stat-value">${(job.facilityIds || []).length} selected</div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function patchJobCard(job) {
+      const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+      const badge = statusBadge(job.status);
+
+      const badgeEl = document.getElementById('jcard-badge-' + job.id);
+      setIfDiff(badgeEl, badge);
+
+      const checksEl = document.getElementById('jcard-checks-' + job.id);
+      const checksHtml = `${job.successfulChecks}/${job.totalChecks} <span style="color:var(--text2);font-weight:400">(${rate}%)</span>`;
+      setIfDiff(checksEl, checksHtml);
+
+      const uptimeEl = document.getElementById('jcard-uptime-' + job.id);
+      setTextIfDiff(uptimeEl, uptime);
+
+      // Booking banner
+      const bannerEl = document.getElementById('jcard-banner-' + job.id);
+      if (bannerEl) {
+        let bookingBanner = '';
         if (job.status === 'booked' && job.bookedDate) {
-          html += `
+          bookingBanner = `
             <div class="booking-banner">
               <div class="booking-banner-icon">🎉</div>
               <div>
@@ -794,39 +984,24 @@
               </div>
             </div>`;
         }
-
-        html += `
-            <div class="job-stats">
-              <div class="job-stat">
-                <div class="job-stat-label">Date Range</div>
-                <div class="job-stat-value">${esc(job.startDate)} → ${esc(job.endDate)}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Checks</div>
-                <div class="job-stat-value">${job.successfulChecks}/${job.totalChecks} <span style="color:var(--text2);font-weight:400">(${rate}%)</span></div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Uptime</div>
-                <div class="job-stat-value">${uptime}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Locations</div>
-                <div class="job-stat-value">${(job.facilityIds || []).length} selected</div>
-              </div>
-            </div>
-          </div>`;
+        setIfDiff(bannerEl, bookingBanner);
       }
-      html += '</div>';
-      app.innerHTML = html;
     }
 
     function renderJobDetail() {
       const job = jobs.find(j => j.id === currentJobId);
       if (!job) { currentView = 'list'; render(); return; }
 
-      const badge = statusBadge(job.status);
-      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+      // ── If the detail scaffold is already in the DOM for this job, do a silent patch ──
+      if (renderedView === 'detail' && document.getElementById('detail-badge')) {
+        patchJobDetail(job);
+        return;
+      }
+
+      // ── Full first-time render ──
       const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+      const badge = statusBadge(job.status);
 
       let html = `
         <div class="detail-back" onclick="backToList()">← Back to Jobs</div>
@@ -836,21 +1011,10 @@
             <div style="font-size:13px;color:var(--text2)">${esc(job.email)} · Schedule ${esc(job.scheduleId)} · ${esc(job.country)}</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            ${badge}
+            <span id="detail-badge">${badge}</span>
           </div>
-        </div>`;
-
-      if (job.status === 'booked' && job.bookedDate) {
-        html += `
-          <div class="booking-banner">
-            <div class="booking-banner-icon">🎉</div>
-            <div>
-              <h3>Appointment Booked!</h3>
-              <p>Date: ${esc(job.bookedDate)} · Time: ${esc(job.bookedTime || '—')} · ${esc(job.bookedFacility || '')}</p>
-              <p style="margin-top:4px;font-size:12px">Booked at: ${job.bookedAt || '—'}</p>
-            </div>
-          </div>`;
-      }
+        </div>
+        <div id="detail-booking-banner"></div>`;
 
       html += `<div class="detail-sections">`;
 
@@ -859,15 +1023,8 @@
         <div class="card">
           <div class="card-header"><h2>Controls</h2></div>
           <div class="card-body">
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              ${job.status === 'running'
-                ? `<button class="btn btn-danger" onclick="stopJob('${job.id}')">⏹ Stop</button>`
-                : `<button class="btn btn-success" onclick="startJob('${job.id}')" ${(job.facilityIds || []).length === 0 ? 'disabled title="Select locations first"' : ''}>▶ Start</button>`
-              }
-              <button class="btn btn-ghost" onclick="showEditModal('${job.id}')">✏️ Edit</button>
-              <button class="btn btn-ghost" onclick="openLocationPicker('${job.id}')">📍 Locations</button>
-              ${job.status === 'booked' ? `<button class="btn btn-warning btn-sm" onclick="resetJob('${job.id}')">🔄 Reset Booking</button>` : ''}
-              <button class="btn btn-danger btn-sm" onclick="deleteJob('${job.id}')" style="margin-left:auto">🗑 Delete</button>
+            <div id="detail-controls" style="display:flex;gap:8px;flex-wrap:wrap">
+              ${buildControlsHTML(job)}
             </div>
           </div>
         </div>`;
@@ -876,42 +1033,8 @@
       html += `
         <div class="card">
           <div class="card-header"><h2>Stats</h2></div>
-          <div class="card-body">
-            <div class="job-stats">
-              <div class="job-stat">
-                <div class="job-stat-label">Total Checks</div>
-                <div class="job-stat-value">${job.totalChecks}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Successful</div>
-                <div class="job-stat-value green">${job.successfulChecks}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Failed</div>
-                <div class="job-stat-value red">${job.failedChecks}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Success Rate</div>
-                <div class="job-stat-value">${rate}%</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Consecutive Fails</div>
-                <div class="job-stat-value ${job.consecutiveFailures > 3 ? 'red' : ''}">${job.consecutiveFailures}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Re-logins</div>
-                <div class="job-stat-value">${job.reloginCount}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Uptime</div>
-                <div class="job-stat-value">${uptime}</div>
-              </div>
-              <div class="job-stat">
-                <div class="job-stat-label">Last Check</div>
-                <div class="job-stat-value" style="font-size:11px">${job.lastCheckAt ? new Date(job.lastCheckAt).toLocaleTimeString() : '—'}</div>
-              </div>
-            </div>
-            ${job.lastError ? `<div style="margin-top:12px;padding:8px 12px;background:var(--red-bg);border-radius:6px;font-size:12px;color:var(--red)">Last error: ${esc(job.lastError)}</div>` : ''}
+          <div class="card-body" id="detail-stats-body">
+            ${buildStatsHTML(job, rate, uptime)}
           </div>
         </div>`;
 
@@ -942,8 +1065,9 @@
       html += `
         <div class="card">
           <div class="card-header">
-            <h2>Logs</h2>
+            <h2>Logs <span style="font-size:11px;color:var(--text2);font-weight:400">(last 300)</span></h2>
             <div style="display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="openAllLogs('${job.id}')">📄 View All</button>
               <button class="btn btn-ghost btn-sm" onclick="refreshLogs()">🔄 Refresh</button>
               <button class="btn btn-ghost btn-sm" onclick="clearJobLogs('${job.id}')">🗑 Clear</button>
             </div>
@@ -952,7 +1076,7 @@
             <div class="log-controls">
               <label><input type="checkbox" id="logAutoScroll" checked> Auto-scroll</label>
               <label><input type="checkbox" id="logShowDebug"> Show debug</label>
-              <label><input type="checkbox" id="logAutoRefresh" ${job.status === 'running' ? 'checked' : ''}  onchange="toggleLogAutoRefresh(this.checked)"> Auto-refresh</label>
+              <label><input type="checkbox" id="logAutoRefresh" ${job.status === 'running' ? 'checked' : ''} onchange="toggleLogAutoRefresh(this.checked)"> Auto-refresh</label>
             </div>
             <div class="log-viewer" id="logViewer">
               <div class="loading-overlay"><div class="spinner"></div> Loading logs...</div>
@@ -962,6 +1086,10 @@
 
       html += `</div>`;
       document.getElementById('app').innerHTML = html;
+      renderedView = 'detail';
+
+      // Populate booking banner
+      patchBookingBanner(job);
 
       // Load logs
       loadLogs();
@@ -971,6 +1099,96 @@
 
       // Load location names for facility chips
       loadFacilityNames(job);
+    }
+
+    function buildControlsHTML(job) {
+      return `
+        ${job.status === 'running'
+          ? `<button class="btn btn-danger" onclick="stopJob('${job.id}')">⏹ Stop</button>`
+          : `<button class="btn btn-success" onclick="startJob('${job.id}')" ${(job.facilityIds || []).length === 0 ? 'disabled title="Select locations first"' : ''}>▶ Start</button>`
+        }
+        <button class="btn btn-ghost" onclick="showEditModal('${job.id}')">✏️ Edit</button>
+        <button class="btn btn-ghost" onclick="openLocationPicker('${job.id}')">📍 Locations</button>
+        ${job.status === 'booked' ? `<button class="btn btn-warning btn-sm" onclick="resetJob('${job.id}')">🔄 Reset Booking</button>` : ''}
+        <button class="btn btn-danger btn-sm" onclick="deleteJob('${job.id}')" style="margin-left:auto">🗑 Delete</button>`;
+    }
+
+    function buildStatsHTML(job, rate, uptime) {
+      return `
+        <div class="job-stats">
+          <div class="job-stat">
+            <div class="job-stat-label">Total Checks</div>
+            <div class="job-stat-value" id="ds-total">${job.totalChecks}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Successful</div>
+            <div class="job-stat-value green" id="ds-success">${job.successfulChecks}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Failed</div>
+            <div class="job-stat-value red" id="ds-failed">${job.failedChecks}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Success Rate</div>
+            <div class="job-stat-value" id="ds-rate">${rate}%</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Consecutive Fails</div>
+            <div class="job-stat-value ${job.consecutiveFailures > 3 ? 'red' : ''}" id="ds-consec">${job.consecutiveFailures}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Re-logins</div>
+            <div class="job-stat-value" id="ds-relogin">${job.reloginCount}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Uptime</div>
+            <div class="job-stat-value" id="ds-uptime">${uptime}</div>
+          </div>
+          <div class="job-stat">
+            <div class="job-stat-label">Last Check</div>
+            <div class="job-stat-value" id="ds-lastcheck" style="font-size:11px">${job.lastCheckAt ? new Date(job.lastCheckAt).toLocaleTimeString() : '—'}</div>
+          </div>
+        </div>
+        <div id="ds-lasterror">${job.lastError ? `<div style="margin-top:12px;padding:8px 12px;background:var(--red-bg);border-radius:6px;font-size:12px;color:var(--red)">Last error: ${esc(job.lastError)}</div>` : ''}</div>`;
+    }
+
+    function patchBookingBanner(job) {
+      const el = document.getElementById('detail-booking-banner');
+      if (!el) return;
+      let html = '';
+      if (job.status === 'booked' && job.bookedDate) {
+        html = `
+          <div class="booking-banner">
+            <div class="booking-banner-icon">🎉</div>
+            <div>
+              <h3>Appointment Booked!</h3>
+              <p>Date: ${esc(job.bookedDate)} · Time: ${esc(job.bookedTime || '—')} · ${esc(job.bookedFacility || '')}</p>
+              <p style="margin-top:4px;font-size:12px">Booked at: ${job.bookedAt || '—'}</p>
+            </div>
+          </div>`;
+      }
+      setIfDiff(el, html);
+    }
+
+    function patchJobDetail(job) {
+      const rate = job.totalChecks > 0 ? Math.round((job.successfulChecks / job.totalChecks) * 100) : 0;
+      const uptime = job.startedAt ? formatUptime(job.startedAt) : '—';
+
+      setIfDiff(document.getElementById('detail-badge'), statusBadge(job.status));
+      patchBookingBanner(job);
+      setIfDiff(document.getElementById('detail-controls'), buildControlsHTML(job));
+
+      setTextIfDiff(document.getElementById('ds-total'), String(job.totalChecks));
+      setTextIfDiff(document.getElementById('ds-success'), String(job.successfulChecks));
+      setTextIfDiff(document.getElementById('ds-failed'), String(job.failedChecks));
+      setTextIfDiff(document.getElementById('ds-rate'), rate + '%');
+      setTextIfDiff(document.getElementById('ds-consec'), String(job.consecutiveFailures));
+      setTextIfDiff(document.getElementById('ds-relogin'), String(job.reloginCount));
+      setTextIfDiff(document.getElementById('ds-uptime'), uptime);
+      setTextIfDiff(document.getElementById('ds-lastcheck'), job.lastCheckAt ? new Date(job.lastCheckAt).toLocaleTimeString() : '—');
+
+      const errEl = document.getElementById('ds-lasterror');
+      setIfDiff(errEl, job.lastError ? `<div style="margin-top:12px;padding:8px 12px;background:var(--red-bg);border-radius:6px;font-size:12px;color:var(--red)">Last error: ${esc(job.lastError)}</div>` : '');
     }
 
     // ============================================================
@@ -985,6 +1203,9 @@
       }
     }
 
+    // Track last known log count to avoid unnecessary DOM writes
+    let lastLogCount = 0;
+
     async function loadLogs() {
       if (!currentJobId) return;
       try {
@@ -997,16 +1218,28 @@
         if (!showDebug) logs = logs.filter(l => l.level !== 'debug');
 
         if (logs.length === 0) {
-          viewer.innerHTML = '<div style="color:var(--text2);padding:20px;text-align:center">No logs yet</div>';
+          if (lastLogCount !== 0) {
+            viewer.innerHTML = '<div style="color:var(--text2);padding:20px;text-align:center">No logs yet</div>';
+            lastLogCount = 0;
+          }
           return;
         }
+
+        // Only repaint if we have new entries
+        if (logs.length === lastLogCount) return;
+        lastLogCount = logs.length;
+
+        // Remember scroll position and whether user is near the bottom
+        const autoScroll = document.getElementById('logAutoScroll')?.checked;
+        const isAtBottom = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight < 60;
 
         viewer.innerHTML = logs.map(l => {
           const ts = new Date(l.created_at).toLocaleTimeString();
           return `<div class="log-line"><span class="log-ts">[${ts}]</span> <span class="log-${l.level}">${esc(l.message)}</span></div>`;
         }).join('');
 
-        if (document.getElementById('logAutoScroll')?.checked) {
+        // Only scroll down when auto-scroll is on AND the user was already at the bottom
+        if (autoScroll && isAtBottom) {
           viewer.scrollTop = viewer.scrollHeight;
         }
       } catch (err) { /* ignore */ }
@@ -1020,7 +1253,83 @@
       }
     }
 
-    function refreshLogs() { loadLogs(); }
+    function refreshLogs() {
+      lastLogCount = 0; // force repaint on manual refresh
+      loadLogs();
+    }
+
+    // ── All-Logs Modal ──
+    let allLogsData = [];  // raw full log list
+
+    async function openAllLogs(jobId) {
+      const job = jobs.find(j => j.id === (jobId || currentJobId));
+      if (!job) return;
+
+      // Reset and open modal
+      allLogsData = [];
+      document.getElementById('allLogsTitle').textContent = 'All Logs — ' + job.name;
+      document.getElementById('allLogsSubtitle').textContent = '';
+      document.getElementById('allLogCount').textContent = '';
+      document.getElementById('allLogSearch').value = '';
+      document.getElementById('allLogLevel').value = '';
+      document.getElementById('allLogViewer').innerHTML =
+        '<div class="loading-overlay"><div class="spinner"></div> Fetching all logs…</div>';
+      document.getElementById('allLogsModal').classList.add('active');
+
+      try {
+        const data = await api('GET', '/jobs/' + job.id + '/logs?limit=10000');
+        allLogsData = data.logs || [];
+        document.getElementById('allLogsSubtitle').textContent =
+          job.email + ' · Schedule ' + job.scheduleId;
+        filterAllLogs();
+      } catch (err) {
+        document.getElementById('allLogViewer').innerHTML =
+          `<div style="color:var(--red);padding:20px;text-align:center">Failed to load logs: ${esc(err.message)}</div>`;
+      }
+    }
+
+    function filterAllLogs() {
+      const search = document.getElementById('allLogSearch').value.toLowerCase();
+      const level  = document.getElementById('allLogLevel').value;
+
+      let filtered = allLogsData;
+      if (level)  filtered = filtered.filter(l => l.level === level);
+      if (search) filtered = filtered.filter(l => l.message.toLowerCase().includes(search));
+
+      document.getElementById('allLogCount').textContent =
+        filtered.length + ' / ' + allLogsData.length + ' entries';
+
+      if (filtered.length === 0) {
+        document.getElementById('allLogViewer').innerHTML =
+          '<div style="color:var(--text2);padding:20px;text-align:center">No matching log entries</div>';
+        return;
+      }
+
+      document.getElementById('allLogViewer').innerHTML = filtered.map(l => {
+        const ts = new Date(l.created_at).toLocaleString();
+        return `<div class="log-line"><span class="log-ts">[${ts}]</span> <span class="log-${l.level}">${esc(l.message)}</span></div>`;
+      }).join('');
+    }
+
+    function closeAllLogsModal() {
+      document.getElementById('allLogsModal').classList.remove('active');
+    }
+
+    function downloadLogs() {
+      if (!allLogsData.length) return;
+      const job = jobs.find(j => j.id === currentJobId);
+      const text = allLogsData.map(l => {
+        const ts = new Date(l.created_at).toISOString();
+        return `[${ts}] [${l.level.toUpperCase()}] ${l.message}`;
+      }).join('\n');
+      const blob = new Blob([text], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (job ? job.name.replace(/[^a-z0-9]/gi, '_') : 'job') + '_logs.txt';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
 
     async function loadFacilityNames(job) {
       try {
@@ -1248,12 +1557,16 @@
     function viewJob(id) {
       currentView = 'detail';
       currentJobId = id;
+      renderedView = null;
+      lastLogCount = 0;
       render();
     }
 
     function backToList() {
       currentView = 'list';
       currentJobId = null;
+      renderedView = null;
+      lastLogCount = 0;
       if (logRefreshInterval) clearInterval(logRefreshInterval);
       logRefreshInterval = null;
       render();
@@ -1443,6 +1756,7 @@
       if (e.key === 'Escape') {
         closeModal();
         closeLocationModal();
+        closeAllLogsModal();
       }
     });
   </script>
