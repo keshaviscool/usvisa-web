@@ -118,7 +118,7 @@ app.get('/api/jobs/:id', (req, res) => {
 app.post('/api/jobs', (req, res) => {
   try {
     const { name, email, password, scheduleId, country, facilityIds,
-            startDate, endDate, checkIntervalSeconds, autoBook } = req.body;
+            startDate, endDate, checkIntervalSeconds, intervalSchedule, autoBook } = req.body;
 
     if (!email || !password || !scheduleId) {
       return res.status(400).json({ error: 'email, password, and scheduleId are required.' });
@@ -133,6 +133,7 @@ app.post('/api/jobs', (req, res) => {
       facilityIds: facilityIds || [],
       startDate, endDate,
       checkIntervalSeconds: checkIntervalSeconds || 30,
+      intervalSchedule: intervalSchedule || [],
       autoBook: autoBook !== false
     });
 

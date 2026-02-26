@@ -1187,6 +1187,16 @@ class SchedulerInstance {
 
     db.updateJob(this.jobId, { status: 'running', startedAt: this.health.startedAt });
     this.log('info', '🚀 Starting scheduler for ' + this.config.email + ' (Puppeteer mode)');
+    
+    // Log interval configuration
+    if (this.config.intervalSchedule && this.config.intervalSchedule.length > 0) {
+      this.log('info', '⏱️ Interval schedule active: ' + this.config.intervalSchedule.length + ' phases');
+      this.config.intervalSchedule.forEach((phase, i) => {
+        this.log('info', '  Phase ' + (i + 1) + ': ' + phase.seconds + 's for ' + phase.durationMinutes + ' min');
+      });
+    } else {
+      this.log('info', '⏱️ Using fixed interval: ' + this.config.checkIntervalSeconds + 's');
+    }
 
     // Login (launches browser + navigates to login page)
     try {
