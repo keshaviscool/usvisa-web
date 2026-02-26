@@ -129,6 +129,7 @@ class JobManager {
       startDate: job.startDate,
       endDate: job.endDate,
       checkIntervalSeconds: job.checkIntervalSeconds,
+      intervalSchedule: job.intervalSchedule || [],
       autoBook: job.autoBook,
       maxReloginAttempts: job.maxReloginAttempts,
       requestTimeoutMs: job.requestTimeoutMs,

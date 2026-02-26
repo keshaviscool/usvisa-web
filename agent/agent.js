@@ -130,6 +130,7 @@ async function runAgent() {
       startDate: jobConfig.startDate,
       endDate: jobConfig.endDate,
       checkIntervalSeconds: jobConfig.checkIntervalSeconds || 30,
+      intervalSchedule: jobConfig.intervalSchedule || [],
       autoBook: jobConfig.autoBook !== false,
       maxReloginAttempts: jobConfig.maxReloginAttempts || 5,
       requestTimeoutMs: jobConfig.requestTimeoutMs || 20000,
