@@ -1174,6 +1174,7 @@ class SchedulerInstance {
       startDate: job.startDate,
       endDate: job.endDate,
       checkIntervalSeconds: job.checkIntervalSeconds,
+      intervalSchedule: job.intervalSchedule || [],
       autoBook: job.autoBook,
       maxReloginAttempts: job.maxReloginAttempts,
       requestTimeoutMs: job.requestTimeoutMs,
@@ -1222,6 +1223,10 @@ class SchedulerInstance {
     ];
     let blockCount = 0;
 
+    // Interval schedule tracking
+    let scheduleStartTime = Date.now();
+    let currentScheduleIndex = 0;
+
     while (this.running) {
       try {
         const result = await this.runCheckCycle();
@@ -1252,6 +1257,9 @@ class SchedulerInstance {
           } catch (e) {
             this.log('error', 'Re-login after cooldown failed: ' + e.message);
           }
+          // Reset schedule timer after cooldown
+          scheduleStartTime = Date.now();
+          currentScheduleIndex = 0;
           continue;
         }
 
@@ -1290,8 +1298,40 @@ class SchedulerInstance {
 
       if (!this.running) break;
 
+      // ── Calculate next interval based on schedule ──
+      let intervalSeconds = this.config.checkIntervalSeconds || 30;
+
+      if (this.config.intervalSchedule && this.config.intervalSchedule.length > 0) {
+        const schedule = this.config.intervalSchedule;
+        const elapsedMinutes = (Date.now() - scheduleStartTime) / 60000;
+
+        // Find which schedule phase we're in
+        let accumulatedMinutes = 0;
+        for (let i = 0; i < schedule.length; i++) {
+          const phase = schedule[i];
+          accumulatedMinutes += phase.durationMinutes;
+
+          if (elapsedMinutes < accumulatedMinutes) {
+            intervalSeconds = phase.seconds;
+            if (i !== currentScheduleIndex) {
+              currentScheduleIndex = i;
+              this.log('info', '⏱️ Interval schedule: switching to ' + intervalSeconds + 's for next ' + phase.durationMinutes + ' min');
+            }
+            break;
+          }
+        }
+
+        // If we've gone through the entire schedule, loop back to the beginning
+        if (elapsedMinutes >= accumulatedMinutes) {
+          scheduleStartTime = Date.now();
+          currentScheduleIndex = 0;
+          intervalSeconds = schedule[0].seconds;
+          this.log('info', '🔄 Interval schedule: restarting cycle — ' + intervalSeconds + 's for ' + schedule[0].durationMinutes + ' min');
+        }
+      }
+
       // Wait for next cycle with ±10% jitter
-      const interval = (this.config.checkIntervalSeconds || 30) * 1000;
+      const interval = intervalSeconds * 1000;
       const jitter = interval * 0.1 * (Math.random() - 0.5);
       const waitMs = Math.max(3000, interval + jitter);
       await this.sleep(waitMs);

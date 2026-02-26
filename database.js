@@ -84,6 +84,7 @@ function initDatabase() {
   if (!cols.includes('droplet_id'))     db.exec("ALTER TABLE jobs ADD COLUMN droplet_id TEXT");
   if (!cols.includes('droplet_ip'))     db.exec("ALTER TABLE jobs ADD COLUMN droplet_ip TEXT");
   if (!cols.includes('droplet_status')) db.exec("ALTER TABLE jobs ADD COLUMN droplet_status TEXT");
+  if (!cols.includes('interval_schedule')) db.exec("ALTER TABLE jobs ADD COLUMN interval_schedule TEXT");
 
   return db;
 }
@@ -94,9 +95,9 @@ function createJob(data) {
   const id = uuidv4().substring(0, 8);
   const stmt = db.prepare(`
     INSERT INTO jobs (id, name, email, password, schedule_id, country, facility_ids,
-      start_date, end_date, check_interval_seconds, auto_book,
+      start_date, end_date, check_interval_seconds, interval_schedule, auto_book,
       max_relogin_attempts, request_timeout_ms, max_retries)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run(
     id,
@@ -109,6 +110,7 @@ function createJob(data) {
     data.startDate,
     data.endDate,
     data.checkIntervalSeconds || 30,
+    JSON.stringify(data.intervalSchedule || []),
     data.autoBook !== false ? 1 : 0,
     data.maxReloginAttempts || 5,
     data.requestTimeoutMs || 20000,
@@ -137,6 +139,7 @@ function updateJob(id, data) {
     scheduleId: 'schedule_id', country: 'country',
     startDate: 'start_date', endDate: 'end_date',
     checkIntervalSeconds: 'check_interval_seconds',
+    intervalSchedule: 'interval_schedule',
     autoBook: 'auto_book',
     maxReloginAttempts: 'max_relogin_attempts',
     requestTimeoutMs: 'request_timeout_ms',
@@ -156,7 +159,7 @@ function updateJob(id, data) {
     if (data[key] !== undefined) {
       fields.push(col + ' = ?');
       let val = data[key];
-      if (key === 'facilityIds') val = JSON.stringify(val);
+      if (key === 'facilityIds' || key === 'intervalSchedule') val = JSON.stringify(val);
       if (key === 'autoBook') val = val ? 1 : 0;
       values.push(val);
     }
@@ -187,6 +190,7 @@ function formatJob(row) {
     startDate: row.start_date,
     endDate: row.end_date,
     checkIntervalSeconds: row.check_interval_seconds,
+    intervalSchedule: JSON.parse(row.interval_schedule || '[]'),
     autoBook: !!row.auto_book,
     maxReloginAttempts: row.max_relogin_attempts,
     requestTimeoutMs: row.request_timeout_ms,

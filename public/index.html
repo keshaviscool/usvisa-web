@@ -671,18 +671,27 @@
             <input type="date" id="fEndDate">
           </div>
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Check Interval (seconds)</label>
-            <input type="number" id="fInterval" value="30" min="5">
+
+        <!-- Interval Schedule Builder -->
+        <div class="form-group">
+          <label style="display:flex;justify-content:space-between;align-items:center">
+            <span>Check Interval Schedule <span style="color:var(--text2);font-weight:400;font-size:12px">(randomizes bot behavior)</span></span>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="addIntervalPhase()" style="font-size:12px;padding:4px 12px">+ Add Phase</button>
+          </label>
+          <div id="intervalScheduleContainer">
+            <!-- Dynamic interval phases will be inserted here -->
           </div>
-          <div class="form-group">
-            <label>Auto Book</label>
-            <select id="fAutoBook">
-              <option value="true">Yes - Auto book when found</option>
-              <option value="false">No - Just notify</option>
-            </select>
+          <div style="font-size:11px;color:var(--text2);margin-top:8px">
+            💡 Example: 2s for 20min → 5s for 40min → 10s for 60min. Schedule loops automatically.
           </div>
+        </div>
+
+        <div class="form-group">
+          <label>Auto Book</label>
+          <select id="fAutoBook">
+            <option value="true">Yes - Auto book when found</option>
+            <option value="false">No - Just notify</option>
+          </select>
         </div>
       </div>
       <div class="modal-footer">
@@ -1045,10 +1054,25 @@
           <div class="card-body">
             <div class="job-stats">
               <div class="job-stat"><div class="job-stat-label">Date Range</div><div class="job-stat-value">${esc(job.startDate)} → ${esc(job.endDate)}</div></div>
-              <div class="job-stat"><div class="job-stat-label">Interval</div><div class="job-stat-value">${job.checkIntervalSeconds}s</div></div>
               <div class="job-stat"><div class="job-stat-label">Auto Book</div><div class="job-stat-value">${job.autoBook ? '✅ Yes' : '❌ No'}</div></div>
               <div class="job-stat"><div class="job-stat-label">Country</div><div class="job-stat-value">${esc(job.country)}</div></div>
             </div>
+            ${job.intervalSchedule && job.intervalSchedule.length > 0 ? `
+              <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+                <div style="font-size:13px;color:var(--text2);margin-bottom:8px">⏱️ Interval Schedule (loops continuously):</div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px">
+                  ${job.intervalSchedule.map(phase => 
+                    `<div style="padding:6px 12px;background:var(--bg2);border-radius:6px;font-size:12px">
+                      <strong>${phase.seconds}s</strong> <span style="color:var(--text2)">for</span> <strong>${phase.durationMinutes}min</strong>
+                    </div>`
+                  ).join('')}
+                </div>
+              </div>
+            ` : `
+              <div style="margin-top:16px;padding:8px 12px;background:var(--bg2);border-radius:6px;font-size:12px;color:var(--text2)">
+                Using default 30s interval (no custom schedule)
+              </div>
+            `}
             <div style="margin-top:12px">
               <div style="font-size:13px;color:var(--text2);margin-bottom:6px">Selected Locations (${(job.facilityIds||[]).length}):</div>
               <div class="facility-chips" id="facilityChips">
@@ -1405,6 +1429,55 @@
     // ============================================================
     // CREATE / EDIT MODAL
     // ============================================================
+
+    // Interval Schedule Management
+    let intervalSchedule = [];
+
+    function addIntervalPhase() {
+      const phase = { seconds: 30, durationMinutes: 20 };
+      intervalSchedule.push(phase);
+      renderIntervalSchedule();
+    }
+
+    function removeIntervalPhase(index) {
+      intervalSchedule.splice(index, 1);
+      renderIntervalSchedule();
+    }
+
+    function updateIntervalPhase(index, field, value) {
+      if (intervalSchedule[index]) {
+        intervalSchedule[index][field] = parseInt(value) || 0;
+      }
+    }
+
+    function renderIntervalSchedule() {
+      const container = document.getElementById('intervalScheduleContainer');
+      if (intervalSchedule.length === 0) {
+        container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text2);font-size:13px">No interval phases defined. Using default 30s interval.<br><button type="button" class="btn btn-ghost btn-sm" onclick="addIntervalPhase()" style="margin-top:8px">+ Add First Phase</button></div>';
+        return;
+      }
+
+      let html = '';
+      for (let i = 0; i < intervalSchedule.length; i++) {
+        const phase = intervalSchedule[i];
+        html += `
+          <div class="interval-phase" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:12px;background:var(--bg2);border-radius:6px">
+            <div style="flex:1;display:flex;gap:8px;align-items:center">
+              <input type="number" value="${phase.seconds}" min="1" max="300" placeholder="Seconds" 
+                onchange="updateIntervalPhase(${i}, 'seconds', this.value)" 
+                style="width:80px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:13px">
+              <span style="color:var(--text2);font-size:12px">seconds for</span>
+              <input type="number" value="${phase.durationMinutes}" min="1" max="1440" placeholder="Minutes" 
+                onchange="updateIntervalPhase(${i}, 'durationMinutes', this.value)" 
+                style="width:80px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:13px">
+              <span style="color:var(--text2);font-size:12px">minutes</span>
+            </div>
+            <button type="button" onclick="removeIntervalPhase(${i})" class="btn btn-ghost btn-sm" style="color:var(--red);padding:4px 8px;font-size:12px">Remove</button>
+          </div>`;
+      }
+      container.innerHTML = html;
+    }
+
     function showCreateModal() {
       document.getElementById('modalTitle').textContent = 'Create New Job';
       document.getElementById('editJobId').value = '';
@@ -1415,8 +1488,12 @@
       document.getElementById('fCountry').value = 'en-ca';
       document.getElementById('fStartDate').value = '';
       document.getElementById('fEndDate').value = '';
-      document.getElementById('fInterval').value = '30';
       document.getElementById('fAutoBook').value = 'true';
+      
+      // Initialize with default interval schedule
+      intervalSchedule = [];
+      renderIntervalSchedule();
+      
       document.getElementById('jobModal').classList.add('active');
     }
 
@@ -1432,8 +1509,14 @@
       document.getElementById('fCountry').value = job.country || 'en-ca';
       document.getElementById('fStartDate').value = job.startDate || '';
       document.getElementById('fEndDate').value = job.endDate || '';
-      document.getElementById('fInterval').value = job.checkIntervalSeconds || 30;
       document.getElementById('fAutoBook').value = job.autoBook ? 'true' : 'false';
+
+      // Load interval schedule
+      intervalSchedule = job.intervalSchedule && job.intervalSchedule.length > 0 
+        ? JSON.parse(JSON.stringify(job.intervalSchedule))  // deep copy
+        : [];
+      renderIntervalSchedule();
+
       document.getElementById('jobModal').classList.add('active');
     }
 
@@ -1450,7 +1533,8 @@
         country: document.getElementById('fCountry').value,
         startDate: document.getElementById('fStartDate').value,
         endDate: document.getElementById('fEndDate').value,
-        checkIntervalSeconds: parseInt(document.getElementById('fInterval').value) || 30,
+        intervalSchedule: intervalSchedule,
+        checkIntervalSeconds: 30,  // fallback if no schedule defined
         autoBook: document.getElementById('fAutoBook').value === 'true'
       };
 
@@ -1468,6 +1552,21 @@
       if (!data.startDate || !data.endDate) {
         toast('Start and end dates are required.', 'error');
         return;
+      }
+
+      // Validate interval schedule
+      if (data.intervalSchedule.length > 0) {
+        for (let i = 0; i < data.intervalSchedule.length; i++) {
+          const phase = data.intervalSchedule[i];
+          if (!phase.seconds || phase.seconds < 1) {
+            toast(`Phase ${i + 1}: seconds must be at least 1`, 'error');
+            return;
+          }
+          if (!phase.durationMinutes || phase.durationMinutes < 1) {
+            toast(`Phase ${i + 1}: duration must be at least 1 minute`, 'error');
+            return;
+          }
+        }
       }
 
       try {
