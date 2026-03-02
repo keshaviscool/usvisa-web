@@ -31,7 +31,7 @@ function initDatabase() {
       facility_ids TEXT NOT NULL DEFAULT '[]',
       start_date TEXT NOT NULL,
       end_date TEXT NOT NULL,
-      check_interval_seconds INTEGER NOT NULL DEFAULT 30,
+      check_interval_seconds REAL NOT NULL DEFAULT 30,
       auto_book INTEGER NOT NULL DEFAULT 1,
       max_relogin_attempts INTEGER NOT NULL DEFAULT 5,
       request_timeout_ms INTEGER NOT NULL DEFAULT 20000,

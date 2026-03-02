@@ -1446,7 +1446,7 @@
 
     function updateIntervalPhase(index, field, value) {
       if (intervalSchedule[index]) {
-        intervalSchedule[index][field] = parseInt(value) || 0;
+        intervalSchedule[index][field] = field === 'seconds' ? (parseFloat(value) || 0) : (parseInt(value) || 0);
       }
     }
 
@@ -1463,7 +1463,7 @@
         html += `
           <div class="interval-phase" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:12px;background:var(--bg2);border-radius:6px">
             <div style="flex:1;display:flex;gap:8px;align-items:center">
-              <input type="number" value="${phase.seconds}" min="1" max="300" placeholder="Seconds" 
+              <input type="number" value="${phase.seconds}" min="0.1" max="300" step="0.5" placeholder="Seconds" 
                 onchange="updateIntervalPhase(${i}, 'seconds', this.value)" 
                 style="width:80px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:13px">
               <span style="color:var(--text2);font-size:12px">seconds for</span>
@@ -1558,8 +1558,8 @@
       if (data.intervalSchedule.length > 0) {
         for (let i = 0; i < data.intervalSchedule.length; i++) {
           const phase = data.intervalSchedule[i];
-          if (!phase.seconds || phase.seconds < 1) {
-            toast(`Phase ${i + 1}: seconds must be at least 1`, 'error');
+          if (!phase.seconds || phase.seconds < 0.1) {
+            toast(`Phase ${i + 1}: seconds must be at least 0.1`, 'error');
             return;
           }
           if (!phase.durationMinutes || phase.durationMinutes < 1) {
