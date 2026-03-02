@@ -156,6 +156,11 @@ class SchedulerInstance {
     // Pick a unique fingerprint for this instance (stays constant for its lifetime)
     this.fingerprint = pickFingerprint();
 
+    // Tracks consecutive check cycles where ALL facilities returned no AJAX response
+    // (indicates account/API may be blocked from returning scheduling data)
+    this._consecutiveNoAjaxCycles = 0;
+    this._lastFacilityHadAjax = true;
+
     // Health stats (in-memory, synced to DB periodically)
     this.health = {
       totalChecks: 0,
@@ -641,6 +646,9 @@ class SchedulerInstance {
     // Wait for the AJAX response that the dropdown selection triggered
     const daysJson = await daysJsonPromise;
 
+    // Track whether we got a real AJAX response (vs falling back to DOM)
+    this._lastFacilityHadAjax = (daysJson !== null);
+
     if (daysJson !== null) {
       // Check for error signals from the intercepted response
       if (daysJson._error) {
@@ -659,8 +667,9 @@ class SchedulerInstance {
       return [];
     }
 
-    // Fallback: try to extract dates from the rendered datepicker
-    this.log('debug', 'No AJAX intercept, extracting from DOM...');
+    // Fallback: the AJAX request for days never fired or timed out.
+    // This usually means the account's API access is being throttled or blocked.
+    this.log('warn', '⚠️ No AJAX intercept for facility ' + facilityId + ' — API request did not fire. Possible account/IP block.');
     await this.sleep(500); // give calendar time to render
 
     const domDates = await this.page.evaluate(() => {
@@ -991,6 +1000,7 @@ class SchedulerInstance {
     let anySuccess = false;
     let socketFailCount = 0;
     let lastError = null;
+    let noAjaxFacilityCount = 0;
 
     const facilityIds = this.config.facilityIds;
     if (!facilityIds || facilityIds.length === 0) {
@@ -1020,6 +1030,7 @@ class SchedulerInstance {
         const dates = await this.checkDates(facId);
         anySuccess = true;
         socketFailCount = 0; // reset on success
+        if (!this._lastFacilityHadAjax) noAjaxFacilityCount++;
         const matching = this.filterDatesInRange(dates);
 
         if (matching.length > 0) {
@@ -1128,6 +1139,30 @@ class SchedulerInstance {
           this.log('warn', 'CSRF expired. Refreshing...');
           try { await this.fetchLocations(); } catch (e) { /* ignore */ }
         }
+      }
+    }
+
+    // ── Detect API/account block via missing AJAX responses ──
+    // If every facility in this cycle fell back to DOM (no AJAX fired at all),
+    // it strongly suggests the account is being blocked from the scheduling API.
+    if (noAjaxFacilityCount > 0 && noAjaxFacilityCount >= facilityIds.length) {
+      this._consecutiveNoAjaxCycles++;
+      this.log('warn',
+        '⚠️ No AJAX response from ANY facility this cycle (' +
+        noAjaxFacilityCount + '/' + facilityIds.length + '). ' +
+        'Consecutive no-API cycles: ' + this._consecutiveNoAjaxCycles + '/3.');
+      if (this._consecutiveNoAjaxCycles >= 3) {
+        this.health.failedChecks++;
+        this.health.consecutiveFailures++;
+        this.health.lastError = 'ACCOUNT_API_BLOCKED';
+        this.syncHealth();
+        return 'ACCOUNT_BLOCKED';
+      }
+    } else {
+      // At least one facility had a real AJAX response — reset the counter
+      if (this._consecutiveNoAjaxCycles > 0) {
+        this.log('info', 'AJAX response received — resetting no-API-cycle counter.');
+        this._consecutiveNoAjaxCycles = 0;
       }
     }
 
@@ -1268,6 +1303,31 @@ class SchedulerInstance {
             this.log('error', 'Re-login after cooldown failed: ' + e.message);
           }
           // Reset schedule timer after cooldown
+          scheduleStartTime = Date.now();
+          currentScheduleIndex = 0;
+          continue;
+        }
+
+        if (result === 'ACCOUNT_BLOCKED') {
+          const cooldownMs = 3 * 60 * 60 * 1000; // 3 hours
+          this.log('error', '══════════════════════════════════════════════════════');
+          this.log('error', '  🚫 ACCOUNT API BLOCK DETECTED');
+          this.log('error', '  3 consecutive cycles with zero AJAX responses across');
+          this.log('error', '  all ' + (this.config.facilityIds || []).length + ' configured facilit(ies).');
+          this.log('error', '  The scheduling API appears to be blocking this account.');
+          this.log('error', '══════════════════════════════════════════════════════');
+          this.log('warn', '💤 Cooling down for 3 hours before retrying...');
+          db.updateJob(this.jobId, { lastError: 'Account API blocked — cooling down 3 hours' });
+          await this.sleep(cooldownMs);
+          this._consecutiveNoAjaxCycles = 0;
+          this.log('info', '⏰ 3-hour cooldown complete. Re-establishing session...');
+          try {
+            await this.login();
+            this.log('success', 'Re-login after account block cooldown succeeded.');
+            this.health.consecutiveFailures = 0;
+          } catch (e) {
+            this.log('error', 'Re-login after cooldown failed: ' + e.message);
+          }
           scheduleStartTime = Date.now();
           currentScheduleIndex = 0;
           continue;
