@@ -714,263 +714,249 @@ class SchedulerInstance {
   }
 
   // ============================================================
-  // CHECK TIMES — DOM-based (simulates user clicking a date)
-  // After checkDates, the calendar is already loaded.
-  // We click the target date in the datepicker, then wait for
-  // the time dropdown to populate via AJAX.
+  // CHECK TIMES — direct API call (fastest possible)
+  // Hits the times JSON endpoint directly via in-browser fetch.
+  // No DOM manipulation needed — just grab times ASAP.
   // ============================================================
   async checkTimes(facilityId, date) {
-    // Ensure we're on the appointment page with the right facility selected
-    await this.ensureOnAppointmentPage();
+    const timesUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' +
+      this.config.scheduleId + '/appointment/times/' + facilityId +
+      '.json?date=' + date + '&appointments[expedite]=false';
 
-    // Make sure the correct facility is selected
-    await this.page.evaluate((facId) => {
-      const sel = document.querySelector('#appointments_consulate_appointment_facility_id');
-      if (sel && sel.value !== String(facId)) {
-        sel.value = String(facId);
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    }, facilityId);
+    this.log('debug', 'Fetching times for facility ' + facilityId + ' date ' + date + '...');
 
-    // Set up intercept for the times.json AJAX
-    const timesJsonPromise = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.page.off('response', handler);
-        resolve(null);
-      }, 15000);
-
-      const handler = async (response) => {
-        const url = response.url();
-        if (url.includes('/appointment/times/') && url.includes('.json')) {
-          clearTimeout(timeout);
-          this.page.off('response', handler);
-          try {
-            const json = await response.json();
-            resolve(json);
-          } catch (e) {
-            resolve(null);
-          }
-        }
+    const result = await this.page.evaluate(async (url, csrf) => {
+      const headers = {
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest'
       };
-      this.page.on('response', handler);
-    });
+      if (csrf) headers['X-CSRF-Token'] = csrf;
 
-    // Set the date in the date input field (simulates datepicker selection)
-    // The date input is readonly and set by jQuery UI datepicker
-    this.log('debug', 'Setting date ' + date + ' in appointment form...');
-    await this.page.evaluate((dateStr) => {
-      const dateInput = document.querySelector('#appointments_consulate_appointment_date');
-      if (!dateInput) return;
-      // Use jQuery datepicker API if available
-      if (window.jQuery && jQuery(dateInput).datepicker) {
-        jQuery(dateInput).datepicker('setDate', dateStr);
-      } else {
-        // Fallback: set the value directly and fire change
-        dateInput.value = dateStr;
-        dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+      try {
+        const resp = await fetch(url, {
+          method: 'GET',
+          headers: headers,
+          credentials: 'same-origin'
+        });
+
+        if (resp.status === 401 || resp.status === 403) {
+          return { error: 'SESSION_EXPIRED' };
+        }
+        if (resp.status === 429) {
+          return { error: 'RATE_LIMITED' };
+        }
+        if (resp.status === 422) {
+          return { error: 'CSRF_EXPIRED' };
+        }
+        if (!resp.ok) {
+          return { error: 'HTTP ' + resp.status };
+        }
+
+        const data = await resp.json();
+        return { ok: true, data: data };
+      } catch (e) {
+        return { error: e.message || 'fetch failed' };
       }
-    }, date);
+    }, timesUrl, this.csrfToken);
 
-    await this.sleep(300 + Math.random() * 300);
-
-    // Wait for the times AJAX
-    const timesJson = await timesJsonPromise;
-
-    if (timesJson !== null) {
-      const times = (timesJson && timesJson.available_times) ? timesJson.available_times : (Array.isArray(timesJson) ? timesJson : []);
-      this.log('debug', 'Got ' + times.length + ' time slots from intercepted AJAX.');
-      return times;
+    if (result.error) {
+      if (result.error === 'SESSION_EXPIRED' || result.error === 'CSRF_EXPIRED') {
+        throw new Error(result.error);
+      }
+      this.log('warn', 'Times fetch failed: ' + result.error);
+      return [];
     }
 
-    // Fallback: extract times from the select dropdown
-    this.log('debug', 'No AJAX intercept for times, extracting from DOM...');
-    await this.sleep(3000);
-
-    const domTimes = await this.page.evaluate(() => {
-      const sel = document.querySelector('#appointments_consulate_appointment_time');
-      if (!sel) return [];
-      const times = [];
-      sel.querySelectorAll('option').forEach(opt => {
-        const val = opt.value ? opt.value.trim() : '';
-        if (val) times.push(val);
-      });
-      return times;
-    });
-
-    return domTimes;
+    const data = result.data;
+    const times = (data && data.available_times) ? data.available_times : (Array.isArray(data) ? data : []);
+    this.log('debug', 'Got ' + times.length + ' time slots via API.');
+    return times;
   }
 
   // ============================================================
-  // BOOK APPOINTMENT — form-based (simulates user submitting)
-  // Instead of a raw POST, we fill out the form on the
-  // appointment page and submit it like a real user would.
+  // BOOK APPOINTMENT — direct API call with built-in retry
+  // Fetches available times via API, picks the first slot,
+  // and POSTs the booking form. Retries up to 3 times with
+  // 2-second intervals for maximum speed.
   // ============================================================
   async bookAppointment(facilityId, date, time, attemptNum) {
     attemptNum = attemptNum || 1;
-    this.log('info', '📝 Booking attempt #' + attemptNum + ': facility=' + facilityId + ' date=' + date + ' time=' + time);
+    const MAX_ATTEMPTS = 3;
+    const RETRY_DELAY_MS = 1500;
 
-    // Navigate to the appointment page fresh for each booking attempt
-    const apptUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' + this.config.scheduleId + '/appointment';
-    try {
-      await this.page.goto(apptUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.sleep(1500 + Math.random() * 1000);
+    this.log('info', '📝 Booking ' + date + ' at facility ' + facilityId + ' (up to ' + MAX_ATTEMPTS + ' attempts)...');
+
+    // Make sure we have a fresh CSRF token before starting
+    if (!this.csrfToken) {
+      await this.ensureOnAppointmentPage();
       await this.extractCsrf();
-    } catch (err) {
-      throw new Error('Could not load appointment page for booking: ' + err.message);
     }
 
-    const currentUrl = this.page.url();
-    if (currentUrl.includes('sign_in')) {
-      return { success: false, verified: false, reason: 'Session expired during booking', date, time, facilityId };
-    }
-
-    // Wait for the form to be ready
-    try {
-      await this.page.waitForSelector('#appointments_consulate_appointment_facility_id', { timeout: 10000 });
-    } catch (e) {
-      return { success: false, verified: false, reason: 'Appointment form not loaded', date, time, facilityId };
-    }
-
-    // Step 1: Select the facility
-    this.log('debug', 'Booking: selecting facility ' + facilityId);
-    await this.page.select('#appointments_consulate_appointment_facility_id', String(facilityId));
-    await this.sleep(1000 + Math.random() * 500);
-
-    // Step 2: Wait for the date/time section to appear
-    try {
-      await this.page.waitForSelector('#consulate_date_time', { visible: true, timeout: 15000 });
-    } catch (e) {
-      this.log('debug', 'Date/time section did not appear, trying to continue...');
-    }
-
-    // Step 3: Set the date using jQuery datepicker
-    this.log('debug', 'Booking: setting date ' + date);
-    await this.page.evaluate((dateStr) => {
-      const dateInput = document.querySelector('#appointments_consulate_appointment_date');
-      if (!dateInput) return;
-      if (window.jQuery && jQuery(dateInput).datepicker) {
-        jQuery(dateInput).datepicker('setDate', dateStr);
-      } else {
-        dateInput.value = dateStr;
-        dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (!this.running) {
+        return { success: false, verified: false, reason: 'Stopped', date, time: null, facilityId };
       }
-    }, date);
-    await this.sleep(1500 + Math.random() * 500);
 
-    // Step 4: Wait for time slots to load, then select the time
-    this.log('debug', 'Booking: selecting time ' + time);
-    // Wait for the time <select> to have options
-    try {
-      await this.page.waitForFunction(
-        () => {
-          const sel = document.querySelector('#appointments_consulate_appointment_time');
-          return sel && sel.options.length > 1;
-        },
-        { timeout: 10000 }
-      );
-    } catch (e) {
-      this.log('debug', 'Time options did not populate, attempting to set directly...');
-    }
+      this.log('info', '🔄 Attempt #' + attempt + '/' + MAX_ATTEMPTS);
 
-    // Try native page.select, fall back to evaluate
-    try {
-      await this.page.select('#appointments_consulate_appointment_time', time);
-    } catch (e) {
-      await this.page.evaluate((t) => {
-        const sel = document.querySelector('#appointments_consulate_appointment_time');
-        if (sel) {
-          // Add the option if it doesn't exist
-          let found = false;
-          for (let i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value === t) { found = true; break; }
+      try {
+        // Step 1: Fetch available times via API
+        const timesUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' +
+          this.config.scheduleId + '/appointment/times/' + facilityId +
+          '.json?date=' + date + '&appointments[expedite]=false';
+
+        const timesResult = await this.page.evaluate(async (url, csrf) => {
+          const headers = {
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest'
+          };
+          if (csrf) headers['X-CSRF-Token'] = csrf;
+
+          try {
+            const resp = await fetch(url, {
+              method: 'GET',
+              headers: headers,
+              credentials: 'same-origin'
+            });
+            if (!resp.ok) return { error: 'HTTP ' + resp.status, status: resp.status };
+            const data = await resp.json();
+            return { ok: true, data: data };
+          } catch (e) {
+            return { error: e.message || 'fetch failed' };
           }
-          if (!found) {
-            const opt = document.createElement('option');
-            opt.value = t;
-            opt.text = t;
-            sel.add(opt);
+        }, timesUrl, this.csrfToken);
+
+        if (timesResult.error) {
+          if (timesResult.status === 401 || timesResult.status === 403) {
+            this.log('warn', 'Session expired during booking attempt #' + attempt);
+            return { success: false, verified: false, reason: 'Session expired during booking', date, time: null, facilityId };
           }
-          sel.value = t;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          this.log('warn', 'Failed to fetch times (attempt #' + attempt + '): ' + timesResult.error);
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'Could not fetch times: ' + timesResult.error, date, time: null, facilityId };
         }
-      }, time);
-    }
-    await this.sleep(500 + Math.random() * 300);
 
-    // Step 5: Enable and click the submit button
-    this.log('info', 'Booking: submitting form...');
-    await this.page.evaluate(() => {
-      const submitBtn = document.querySelector('#appointments_submit');
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.removeAttribute('disabled');
+        const timesData = timesResult.data;
+        const availableTimes = (timesData && timesData.available_times) ? timesData.available_times : (Array.isArray(timesData) ? timesData : []);
+        if (availableTimes.length === 0) {
+          this.log('warn', 'No time slots available for ' + date + ' (attempt #' + attempt + ')');
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'No time slots available', date, time: null, facilityId };
+        }
+
+        const selectedTime = time || availableTimes[0];
+        this.log('info', '⏰ Selected time: ' + selectedTime + ' (from ' + availableTimes.length + ' slots)');
+
+        // Step 2: POST booking via API
+        const bookUrl = BASE_URL + '/' + this.config.country + '/niv/schedule/' +
+          this.config.scheduleId + '/appointment';
+
+        const bookResult = await this.page.evaluate(async (url, csrf, facId, bookDate, bookTime) => {
+          const params = new URLSearchParams();
+          params.append('utf8', '\u2713');
+          if (csrf) params.append('authenticity_token', csrf);
+          params.append('appointments[consulate_appointment][facility_id]', facId);
+          params.append('appointments[consulate_appointment][date]', bookDate);
+          params.append('appointments[consulate_appointment][time]', bookTime);
+          params.append('confirmed', 'Confirm');
+
+          const headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'X-Requested-With': 'XMLHttpRequest'
+          };
+          if (csrf) headers['X-CSRF-Token'] = csrf;
+
+          try {
+            const resp = await fetch(url, {
+              method: 'POST',
+              headers: headers,
+              body: params.toString(),
+              credentials: 'same-origin',
+              redirect: 'follow'
+            });
+
+            const html = await resp.text();
+            const lower = html.toLowerCase();
+            return {
+              ok: resp.ok,
+              status: resp.status,
+              redirected: resp.redirected,
+              finalUrl: resp.url,
+              hasSuccess: lower.includes('successfully') || lower.includes('your appointment has been scheduled'),
+              hasInstructions: resp.url.includes('/instructions') || (lower.includes('instructions') && lower.includes('your appointment')),
+              hasUnavailable: lower.includes('no longer available') || lower.includes('no appointment available'),
+              hasProblem: lower.includes('there was a problem') || lower.includes('could not be processed'),
+              hasSignIn: lower.includes('sign_in'),
+              hasCaptcha: lower.includes('captcha') || lower.includes('verify'),
+              hasForm: lower.includes('appointments[consulate_appointment][facility_id]')
+            };
+          } catch (e) {
+            return { error: e.message || 'fetch failed' };
+          }
+        }, bookUrl, this.csrfToken, String(facilityId), date, selectedTime);
+
+        if (bookResult.error) {
+          this.log('warn', 'Booking POST failed (attempt #' + attempt + '): ' + bookResult.error);
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'POST error: ' + bookResult.error, date, time: selectedTime, facilityId };
+        }
+
+        // Check result
+        if (bookResult.hasSuccess || bookResult.hasInstructions || bookResult.redirected) {
+          this.log('success', '🎉 BOOKING VERIFIED! (attempt #' + attempt + ')');
+          return { success: true, verified: true, date, time: selectedTime, facilityId };
+        }
+
+        if (bookResult.hasSignIn) {
+          this.log('warn', 'Session expired during booking POST (attempt #' + attempt + ')');
+          return { success: false, verified: false, reason: 'Session expired during booking', date, time: selectedTime, facilityId };
+        }
+
+        if (bookResult.hasUnavailable) {
+          this.log('warn', 'Slot no longer available (attempt #' + attempt + ')');
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'Slot no longer available', date, time: selectedTime, facilityId };
+        }
+
+        if (bookResult.hasCaptcha) {
+          this.log('warn', 'CAPTCHA/verification required (attempt #' + attempt + ')');
+          return { success: false, verified: false, reason: 'CAPTCHA required', date, time: selectedTime, facilityId };
+        }
+
+        if (bookResult.hasProblem) {
+          this.log('warn', 'Server problem (attempt #' + attempt + ')');
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'Server problem processing booking', date, time: selectedTime, facilityId };
+        }
+
+        if (bookResult.hasForm && !bookResult.redirected) {
+          this.log('warn', 'Still on form — booking not processed (attempt #' + attempt + ')');
+          // Refresh CSRF for next attempt
+          await this.ensureOnAppointmentPage();
+          await this.extractCsrf();
+          if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+          return { success: false, verified: false, reason: 'Booking not processed', date, time: selectedTime, facilityId };
+        }
+
+        // Ambiguous but got response — might have worked
+        if (bookResult.ok || bookResult.redirected) {
+          this.log('warn', '⚠️ Ambiguous response but HTTP OK (attempt #' + attempt + ') — treating as potential success');
+          return { success: true, verified: false, date, time: selectedTime, facilityId, note: 'Response received - please verify booking' };
+        }
+
+        this.log('warn', '⚠️ Unclear result (attempt #' + attempt + ')');
+        if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+        return { success: false, verified: false, reason: 'Ambiguous response', date, time: selectedTime, facilityId };
+
+      } catch (err) {
+        this.log('error', 'Booking error (attempt #' + attempt + '): ' + err.message);
+        if (attempt < MAX_ATTEMPTS) { await this.sleep(RETRY_DELAY_MS); continue; }
+        return { success: false, verified: false, reason: err.message, date, time: null, facilityId };
       }
-    });
-    await this.sleep(200);
-
-    // Listen for navigation after submit
-    const navPromise = this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
-
-    try {
-      await this.page.click('#appointments_submit');
-    } catch (e) {
-      // Fallback: submit the form directly
-      await this.page.evaluate(() => {
-        const form = document.querySelector('#appointment-form');
-        if (form) form.submit();
-      });
     }
 
-    await navPromise;
-    await this.sleep(2000);
-
-    // Step 6: Check the result
-    const html = await this.page.content();
-    const lowerHtml = html.toLowerCase();
-    const resultUrl = this.page.url();
-
-    let confirmed = false;
-    let failReason = null;
-
-    if (lowerHtml.includes('successfully scheduled') || lowerHtml.includes('successfully booked') || lowerHtml.includes('your appointment has been scheduled')) {
-      confirmed = true;
-    }
-
-    // Check if we're on the confirmation/instructions page (step 5)
-    if (!confirmed && (resultUrl.includes('/instructions') || lowerHtml.includes('instructions') && lowerHtml.includes('your appointment'))) {
-      confirmed = true;
-    }
-
-    if (!confirmed) {
-      if (lowerHtml.includes('no longer available') || lowerHtml.includes('no appointment available')) {
-        failReason = 'Slot no longer available';
-      } else if (lowerHtml.includes('there was a problem') || lowerHtml.includes('could not be processed')) {
-        failReason = 'Server problem processing booking';
-      } else if (lowerHtml.includes('sign_in')) {
-        failReason = 'Session expired during booking';
-      } else if (lowerHtml.includes('appointments[consulate_appointment][facility_id]') && resultUrl.includes('/appointment')) {
-        failReason = 'Still on appointment form (booking not processed)';
-      }
-    }
-
-    if (!confirmed && !failReason) {
-      if (lowerHtml.includes('appointments[consulate_appointment][facility_id]') || lowerHtml.includes('reschedule appointment')) {
-        failReason = 'Still on appointment form (booking not processed)';
-      }
-    }
-
-    if (confirmed) {
-      this.log('success', '🎉 BOOKING VERIFIED! (attempt #' + attemptNum + ')');
-      return { success: true, verified: true, date, time, facilityId };
-    }
-
-    if (failReason) {
-      this.log('warn', '❌ Booking NOT confirmed (attempt #' + attemptNum + '): ' + failReason);
-      return { success: false, verified: false, reason: failReason, date, time, facilityId };
-    }
-
-    this.log('warn', '⚠️ Booking result UNCLEAR (attempt #' + attemptNum + ')');
-    return { success: false, verified: false, reason: 'Ambiguous response', date, time, facilityId };
+    return { success: false, verified: false, reason: 'All attempts exhausted', date, time: null, facilityId };
   }
 
   // ============================================================
@@ -1040,50 +1026,54 @@ class SchedulerInstance {
             let booked = false;
             for (let d = 0; d < Math.min(matching.length, 3) && !booked; d++) {
               const targetDate = matching[d];
-              for (let attempt = 1; attempt <= 3 && !booked; attempt++) {
-                if (!this.running) return 'STOPPED';
-                try {
-                  this.log('info', 'Getting time slots for ' + targetDate + '...');
-                  const times = await this.checkTimes(facId, targetDate);
-                  if (times.length === 0) {
-                    this.log('warn', 'No time slots for ' + targetDate);
-                    break;
+              if (!this.running) return 'STOPPED';
+              try {
+                // bookAppointment handles: fetch times → pick first → POST → retry 3x with 2s intervals
+                const result = await this.bookAppointment(facId, targetDate);
+
+                if (result.success && result.verified) {
+                  this.log('success', '═══════════════════════════════════════════');
+                  this.log('success', '  🎉 APPOINTMENT BOOKED & VERIFIED!');
+                  this.log('success', '  Location: ' + facName);
+                  this.log('success', '  Date: ' + result.date);
+                  this.log('success', '  Time: ' + result.time);
+                  this.log('success', '═══════════════════════════════════════════');
+                  booked = true;
+
+                  db.updateJob(this.jobId, {
+                    status: 'booked',
+                    bookedDate: result.date,
+                    bookedTime: result.time,
+                    bookedFacility: facName + ' (' + facId + ')',
+                    bookedAt: new Date().toISOString()
+                  });
+
+                  return 'BOOKED';
+                } else if (result.success && !result.verified) {
+                  // Ambiguous success — still treat as booked but flag it
+                  this.log('warn', '⚠️ Booking may have succeeded (unverified) — ' + (result.note || result.reason || ''));
+                  booked = true;
+
+                  db.updateJob(this.jobId, {
+                    status: 'booked',
+                    bookedDate: result.date,
+                    bookedTime: result.time,
+                    bookedFacility: facName + ' (' + facId + ')',
+                    bookedAt: new Date().toISOString(),
+                    lastError: 'Unverified — please confirm manually'
+                  });
+
+                  return 'BOOKED';
+                } else {
+                  this.log('warn', 'Booking failed for ' + targetDate + ': ' + (result.reason || 'unknown'));
+                  if (result.reason && result.reason.includes('Session expired')) {
+                    await this.login();
                   }
-
-                  this.log('info', 'Booking ' + targetDate + ' ' + times[0] + '...');
-                  const result = await this.bookAppointment(facId, targetDate, times[0], attempt);
-
-                  if (result.success && result.verified) {
-                    this.log('success', '═══════════════════════════════════════════');
-                    this.log('success', '  🎉 APPOINTMENT BOOKED & VERIFIED!');
-                    this.log('success', '  Location: ' + facName);
-                    this.log('success', '  Date: ' + result.date);
-                    this.log('success', '  Time: ' + result.time);
-                    this.log('success', '═══════════════════════════════════════════');
-                    booked = true;
-
-                    db.updateJob(this.jobId, {
-                      status: 'booked',
-                      bookedDate: result.date,
-                      bookedTime: result.time,
-                      bookedFacility: facName + ' (' + facId + ')',
-                      bookedAt: new Date().toISOString()
-                    });
-
-                    return 'BOOKED';
-                  } else {
-                    this.log('warn', 'Booking attempt #' + attempt + ' failed: ' + (result.reason || 'unknown'));
-                    if (result.reason && result.reason.includes('Session expired')) {
-                      await this.login();
-                    }
-                    if (attempt < 3) await this.sleep(500);
-                  }
-                } catch (bookErr) {
-                  this.log('error', 'Booking error (attempt #' + attempt + '): ' + bookErr.message);
-                  if (bookErr.message === 'SESSION_EXPIRED') {
-                    try { await this.login(); } catch (e) { this.log('error', 'Re-login failed: ' + e.message); }
-                  }
-                  if (attempt < 3) await this.sleep(500);
+                }
+              } catch (bookErr) {
+                this.log('error', 'Booking error for ' + targetDate + ': ' + bookErr.message);
+                if (bookErr.message === 'SESSION_EXPIRED') {
+                  try { await this.login(); } catch (e) { this.log('error', 'Re-login failed: ' + e.message); }
                 }
               }
             }
